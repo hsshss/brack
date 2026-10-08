@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Brack/Brack.csproj" />
+  <Project Path="Brack.Tests/Brack.Tests.csproj" />
+</Solution>

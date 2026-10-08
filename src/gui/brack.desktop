@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Brack
+Comment=Play CLAP, VST3 and VST2 instruments together
+Comment[ja]=CLAP / VST3 / VST2 の音源をいくつも同時に鳴らします
+Exec=brack
+Icon=brack
+Terminal=false
+Categories=AudioVideo;Audio;Midi;
+StartupWMClass=Brack

@@ -1,0 +1,87 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Not Brack.dll: a publish for a runtime puts the native brack.dll beside it, and Windows
+         names are case-insensitive. -->
+    <AssemblyName>Brack.NET</AssemblyName>
+    <RootNamespace>Brack</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Public members without a summary are those whose name says it all. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <PackageId>Brack.NET</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>hsshss</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Description>.NET binding of brack.dll (libbrack.so on Linux, libbrack.dylib on macOS): host CLAP, VST3 and VST2 instruments, route MIDI to them and their audio to outputs.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>audio;midi;plugin-host;clap;vst3;vst2</PackageTags>
+    <PackageProjectUrl>https://github.com/hsshss/brack</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/hsshss/brack.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <!-- `dotnet pack` makes the NuGet package; a ProjectReference to this project copies the same files.
+       The native library, from CMake build folders (override with -p:BrackNativeX64=... and so on),
+       with the plugin host processes it starts, which it looks for beside itself: those the
+       build for that architecture ships (x86 and x64; on ARM64, arm64 too). Packed
+       where NuGet resolves them per runtime, and copied to the same places under the output of
+       every project that references this one, where NativeLibraryResolver picks the library for
+       the process's system and architecture. Windows' brack.dll and Linux's libbrack.so come from
+       the same build folders, each where it was built, as does macOS's libbrack.dylib (build: Apple
+       silicon; build-x64: Intel). On Linux, build is this machine's architecture and the other
+       is cross-built beside it (build-arm64 from x64, build-x64 from ARM64). A package with all is
+       packed from folders given for the other systems (-p:BrackNativeLinuxX64=..., say). .NET has
+       no 32-bit x86 Linux. -->
+  <PropertyGroup>
+    <BrackNativeX64 Condition="'$(BrackNativeX64)' == ''">$(MSBuildThisFileDirectory)..\..\..\build\bin\brack.dll</BrackNativeX64>
+    <BrackNativeX86 Condition="'$(BrackNativeX86)' == ''">$(MSBuildThisFileDirectory)..\..\..\build-x86\bin\brack.dll</BrackNativeX86>
+    <BrackNativeArm64 Condition="'$(BrackNativeArm64)' == ''">$(MSBuildThisFileDirectory)..\..\..\build-arm64\bin\brack.dll</BrackNativeArm64>
+    <BrackNativeX64Dir>$([System.IO.Path]::GetDirectoryName('$(BrackNativeX64)'))</BrackNativeX64Dir>
+    <BrackNativeX86Dir>$([System.IO.Path]::GetDirectoryName('$(BrackNativeX86)'))</BrackNativeX86Dir>
+    <BrackNativeArm64Dir>$([System.IO.Path]::GetDirectoryName('$(BrackNativeArm64)'))</BrackNativeArm64Dir>
+    <BrackBuildIsArm64>false</BrackBuildIsArm64>
+    <BrackBuildIsArm64 Condition="$([MSBuild]::IsOSPlatform('Linux')) and '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">true</BrackBuildIsArm64>
+    <BrackNativeLinuxX64 Condition="'$(BrackNativeLinuxX64)' == '' and !$(BrackBuildIsArm64)">$(MSBuildThisFileDirectory)..\..\..\build\bin\libbrack.so</BrackNativeLinuxX64>
+    <BrackNativeLinuxX64 Condition="'$(BrackNativeLinuxX64)' == ''">$(MSBuildThisFileDirectory)..\..\..\build-x64\bin\libbrack.so</BrackNativeLinuxX64>
+    <BrackNativeLinuxArm64 Condition="'$(BrackNativeLinuxArm64)' == '' and $(BrackBuildIsArm64)">$(MSBuildThisFileDirectory)..\..\..\build\bin\libbrack.so</BrackNativeLinuxArm64>
+    <BrackNativeLinuxArm64 Condition="'$(BrackNativeLinuxArm64)' == ''">$(MSBuildThisFileDirectory)..\..\..\build-arm64\bin\libbrack.so</BrackNativeLinuxArm64>
+    <BrackNativeLinuxX64Dir>$([System.IO.Path]::GetDirectoryName('$(BrackNativeLinuxX64)'))</BrackNativeLinuxX64Dir>
+    <BrackNativeLinuxArm64Dir>$([System.IO.Path]::GetDirectoryName('$(BrackNativeLinuxArm64)'))</BrackNativeLinuxArm64Dir>
+    <BrackNativeMacArm64 Condition="'$(BrackNativeMacArm64)' == ''">$(MSBuildThisFileDirectory)..\..\..\build\bin\libbrack.dylib</BrackNativeMacArm64>
+    <BrackNativeMacX64 Condition="'$(BrackNativeMacX64)' == ''">$(MSBuildThisFileDirectory)..\..\..\build-x64\bin\libbrack.dylib</BrackNativeMacX64>
+    <BrackNativeMacArm64Dir>$([System.IO.Path]::GetDirectoryName('$(BrackNativeMacArm64)'))</BrackNativeMacArm64Dir>
+    <BrackNativeMacX64Dir>$([System.IO.Path]::GetDirectoryName('$(BrackNativeMacX64)'))</BrackNativeMacX64Dir>
+  </PropertyGroup>
+  <ItemGroup>
+    <BrackNative Include="$(BrackNativeX64)" Condition="Exists('$(BrackNativeX64)')" Rid="win-x64" />
+    <BrackNative Include="$(BrackNativeX64Dir)\brack-host-x86.exe;$(BrackNativeX64Dir)\brack-host-x64.exe" Condition="Exists('$(BrackNativeX64)')" Rid="win-x64" />
+    <BrackNative Include="$(BrackNativeX86)" Condition="Exists('$(BrackNativeX86)')" Rid="win-x86" />
+    <BrackNative Include="$(BrackNativeX86Dir)\brack-host-x86.exe;$(BrackNativeX86Dir)\brack-host-x64.exe" Condition="Exists('$(BrackNativeX86)')" Rid="win-x86" />
+    <BrackNative Include="$(BrackNativeArm64)" Condition="Exists('$(BrackNativeArm64)')" Rid="win-arm64" />
+    <BrackNative Include="$(BrackNativeArm64Dir)\brack-host-x86.exe;$(BrackNativeArm64Dir)\brack-host-x64.exe;$(BrackNativeArm64Dir)\brack-host-arm64.exe" Condition="Exists('$(BrackNativeArm64)')" Rid="win-arm64" />
+    <BrackNative Include="$(BrackNativeLinuxX64)" Condition="Exists('$(BrackNativeLinuxX64)')" Rid="linux-x64" />
+    <BrackNative Include="$(BrackNativeLinuxX64Dir)\brack-host-x86;$(BrackNativeLinuxX64Dir)\brack-host-x64" Condition="Exists('$(BrackNativeLinuxX64)')" Rid="linux-x64" />
+    <BrackNative Include="$(BrackNativeLinuxArm64)" Condition="Exists('$(BrackNativeLinuxArm64)')" Rid="linux-arm64" />
+    <BrackNative Include="$(BrackNativeLinuxArm64Dir)\brack-host-x86;$(BrackNativeLinuxArm64Dir)\brack-host-x64;$(BrackNativeLinuxArm64Dir)\brack-host-arm64" Condition="Exists('$(BrackNativeLinuxArm64)')" Rid="linux-arm64" />
+    <BrackNative Include="$(BrackNativeMacArm64)" Condition="Exists('$(BrackNativeMacArm64)')" Rid="osx-arm64" />
+    <BrackNative Include="$(BrackNativeMacArm64Dir)\brack-host-x64;$(BrackNativeMacArm64Dir)\brack-host-arm64" Condition="Exists('$(BrackNativeMacArm64)')" Rid="osx-arm64" />
+    <BrackNative Include="$(BrackNativeMacX64)" Condition="Exists('$(BrackNativeMacX64)')" Rid="osx-x64" />
+    <BrackNative Include="$(BrackNativeMacX64Dir)\brack-host-x64" Condition="Exists('$(BrackNativeMacX64)')" Rid="osx-x64" />
+    <None Include="@(BrackNative->Exists())" Pack="true" PackagePath="runtimes/%(Rid)/native/"
+          Link="runtimes\%(Rid)\native\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+  <!-- The native libraries carry third-party code, whose notices go into the package. -->
+  <ItemGroup>
+    <None Include="..\..\..\THIRD_PARTY_NOTICES.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

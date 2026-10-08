@@ -1,0 +1,387 @@
+# Builds and tests Brack for every system, attaches the archives and the NuGet package to the
+# release, and publishes the package to nuget.org. Run by hand with a tag, it builds them again
+# and replaces those already attached; without a tag, it only builds and keeps the files as the
+# run's artifacts (version 0.0.0-dev.<run number>).
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag of the release to build (none for a dry run)
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - id: version
+        shell: bash
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [[ -z $TAG ]]; then
+            echo "version=0.0.0-dev.$RUN_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=${TAG#v}
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::The tag '$TAG' is not a version (v1.2.0, or 1.2.0-beta.1)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Build and test
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          git config --global core.longpaths true  # the dependencies CMake fetches nest deep
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $runner = [Environment]::GetEnvironmentVariables()
+          # The runner's environment with vcvarsall.bat's for one target on top.
+          function Use-Msvc($target) {
+            foreach ($name in [Environment]::GetEnvironmentVariables().Keys) {
+              [Environment]::SetEnvironmentVariable($name, $runner[$name])
+            }
+            cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" $target >nul && set" | ForEach-Object {
+              $name, $value = $_ -split '=', 2
+              [Environment]::SetEnvironmentVariable($name, $value)
+            }
+          }
+          function Build($dir) {
+            cmake -S . -B $dir -G Ninja -DCMAKE_BUILD_TYPE=Release "-DBRACK_VERSION=$env:VERSION"
+            cmake --build $dir
+          }
+          Use-Msvc x86
+          Build build-x86
+          Use-Msvc x64
+          Build build
+          ctest --test-dir build --output-on-failure
+          Use-Msvc x86
+          cmake --build build-x86
+          ctest --test-dir build-x86 --output-on-failure
+          Use-Msvc x64_arm64
+          Build build-arm64
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p out
+          for build in win-x64:build win-x86:build-x86 win-arm64:build-arm64; do
+            rid=${build%%:*} dir=${build#*:} name=brack-$VERSION-$rid
+            cmake --install "$dir" --prefix "stage/$name"
+            tools/check_release_files.sh dist "stage/$name" "$rid"
+            (cd stage && 7z a -tzip "../out/$name.zip" "$name" > /dev/null)
+            mkdir -p "native/$rid"
+            cp "$dir/bin/brack.dll" "$dir"/bin/brack-host-*.exe "native/$rid/"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: brack-${{ env.VERSION }}-win-x64
+          path: out/brack-${{ env.VERSION }}-win-x64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: brack-${{ env.VERSION }}-win-x86
+          path: out/brack-${{ env.VERSION }}-win-x86.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: brack-${{ env.VERSION }}-win-arm64
+          path: out/brack-${{ env.VERSION }}-win-arm64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-win-x64
+          path: native/win-x64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-win-x86
+          path: native/win-x86
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-win-arm64
+          path: native/win-arm64
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Build and test
+        shell: bash
+        run: |
+          set -eu
+          brew install ninja
+          # Before configuring: the x64 half's test runs only where Rosetta 2 is.
+          if [[ ! -e /Library/Apple/usr/libexec/oah/libRosettaRuntime ]]; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          cmake -S . -B build-universal -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" \
+            -DBRACK_CODESIGN_IDENTITY=- "-DBRACK_VERSION=$VERSION"
+          cmake --build build-universal
+          ctest --test-dir build-universal --output-on-failure
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          name=brack-$VERSION-osx-universal
+          cmake --install build-universal --prefix "stage/$name"
+          tools/check_release_files.sh dist "stage/$name" osx-universal
+          mkdir -p out native/osx-universal
+          ditto -c -k --keepParent "stage/$name" "out/$name.zip"
+          cp build-universal/bin/libbrack.dylib build-universal/bin/brack-host-* native/osx-universal/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: brack-${{ env.VERSION }}-osx-universal
+          path: out/brack-${{ env.VERSION }}-osx-universal.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-osx-universal
+          path: native/osx-universal
+
+  # Linux builds in manylinux_2_28 containers, to run on glibc 2.28 and newer
+  # (tools/linux_release_build.sh). The workspace is mounted at the same path, so that the tests run
+  # on the runner afterwards; the .NET SDK too, so that the build registers the binding's test.
+  linux-x64:
+    needs: version
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - name: Build
+        shell: bash
+        run: |
+          set -eu
+          dotnet=$(dirname "$(readlink -f "$(command -v dotnet)")")
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -v "$dotnet:$dotnet:ro" -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
+            quay.io/pypa/manylinux_2_28_x86_64 tools/linux_release_build.sh x64 "$VERSION" "-DBRACK_DOTNET=$dotnet/dotnet"
+          sudo chown -R "$(id -u):$(id -g)" .
+      - name: Test
+        shell: bash
+        run: |
+          set -eu
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64 libx11-6 libgl1 libc6:i386 libx11-6:i386
+          ctest --test-dir build --output-on-failure
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          name=brack-$VERSION-linux-x64
+          tools/check_release_files.sh dist "stage/$name" linux-x64
+          mkdir -p out native/linux-x64 synths/x64 synths/x86
+          tar -czf "out/$name.tar.gz" -C stage "$name"
+          cp build/bin/libbrack.so build/bin/brack-host-* native/linux-x64/
+          cp build/bin/brack-test-synth.clap synths/x64/
+          cp build-x86/bin/brack-test-synth.clap synths/x86/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: brack-${{ env.VERSION }}-linux-x64
+          path: out/brack-${{ env.VERSION }}-linux-x64.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-linux-x64
+          path: native/linux-x64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-hosts
+          path: |
+            build/bin/brack-host-x64
+            build/bin/brack-host-x86
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x64-test-synths
+          path: synths
+
+  linux-arm64:
+    needs: [version, linux-x64]
+    runs-on: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-hosts
+          path: linux-hosts
+      - name: Build
+        shell: bash
+        run: |
+          set -eu
+          dotnet=$(dirname "$(readlink -f "$(command -v dotnet)")")
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -v "$dotnet:$dotnet:ro" -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
+            quay.io/pypa/manylinux_2_28_aarch64 tools/linux_release_build.sh arm64 "$VERSION" "-DBRACK_DOTNET=$dotnet/dotnet" \
+            "-DBRACK_OTHER_ARCH_BINS=$PWD/linux-hosts"
+          sudo chown -R "$(id -u):$(id -g)" .
+      - name: Test
+        shell: bash
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64 libx11-6 libgl1
+          ctest --test-dir build --output-on-failure
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          name=brack-$VERSION-linux-arm64
+          tools/check_release_files.sh dist "stage/$name" linux-arm64
+          mkdir -p out native/linux-arm64 synths/arm64
+          tar -czf "out/$name.tar.gz" -C stage "$name"
+          cp build/bin/libbrack.so build/bin/brack-host-* native/linux-arm64/
+          cp build/bin/brack-test-synth.clap synths/arm64/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: brack-${{ env.VERSION }}-linux-arm64
+          path: out/brack-${{ env.VERSION }}-linux-arm64.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-linux-arm64
+          path: native/linux-arm64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-arm64-test-synths
+          path: synths
+
+  # Each Linux archive on other distributions, with only what it needs installed there.
+  linux-smoke:
+    needs: [version, linux-x64, linux-arm64]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64]
+        # rockylinux/rockylinux: Docker Hub's rockylinux stopped at 9.3.
+        image: [ubuntu:20.04, ubuntu:22.04, debian:12, debian:13, almalinux:8, rockylinux/rockylinux:9, fedora:latest,
+                opensuse/leap:16.0, archlinux:latest]
+        include:
+          - { arch: arm64, image: ubuntu:20.04 }
+          - { arch: arm64, image: debian:12 }
+          - { arch: arm64, image: almalinux:8 }
+          - { arch: arm64, image: fedora:latest }
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    env:
+      NAME: brack-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}
+      IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.NAME }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-${{ matrix.arch }}-test-synths
+          path: synths
+      - shell: bash
+        run: |
+          set -eu
+          tar -xzf "$NAME.tar.gz"
+          docker run --rm -v "$PWD:/smoke" -w /smoke "$IMAGE" tools/linux_smoke_test.sh "$NAME" synths
+
+  publish:
+    needs: [version, windows, macos, linux-x64, linux-arm64, linux-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write  # NuGet trusted publishing
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PUBLISH: ${{ needs.version.outputs.publish }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          path: native
+      - name: Pack
+        shell: bash
+        run: |
+          set -eu
+          n=$PWD/native
+          # The universal libbrack.dylib serves both macOS runtimes.
+          dotnet pack bindings/dotnet/Brack/Brack.csproj -c Release -o out "-p:Version=$VERSION" \
+            "-p:BrackNativeX64=$n/native-win-x64/brack.dll" \
+            "-p:BrackNativeX86=$n/native-win-x86/brack.dll" \
+            "-p:BrackNativeArm64=$n/native-win-arm64/brack.dll" \
+            "-p:BrackNativeLinuxX64=$n/native-linux-x64/libbrack.so" \
+            "-p:BrackNativeLinuxArm64=$n/native-linux-arm64/libbrack.so" \
+            "-p:BrackNativeMacArm64=$n/native-osx-universal/libbrack.dylib" \
+            "-p:BrackNativeMacX64=$n/native-osx-universal/libbrack.dylib"
+          tools/check_release_files.sh nupkg "out/Brack.NET.$VERSION.nupkg"
+      - if: env.PUBLISH != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Brack.NET.${{ env.VERSION }}.nupkg
+          path: out/Brack.NET.${{ env.VERSION }}.nupkg
+      - if: env.PUBLISH == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: brack-*
+          path: dist
+          merge-multiple: true
+      - if: env.PUBLISH == 'true'
+        shell: bash
+        run: gh release upload "$TAG" dist/* "out/Brack.NET.$VERSION.nupkg" --clobber
+      - if: env.PUBLISH == 'true'
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - if: env.PUBLISH == 'true'
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push "out/Brack.NET.$VERSION.nupkg" --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json --skip-duplicate

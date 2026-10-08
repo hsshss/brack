@@ -1,0 +1,11 @@
+build/
+build-*/
+.vs/
+out/
+bindings/dotnet/**/bin/
+bindings/dotnet/**/obj/
+bindings/dotnet/artifacts/
+tools/midi-timing/bin/
+tools/midi-timing/obj/
+tools/app-icon/bin/
+tools/app-icon/obj/

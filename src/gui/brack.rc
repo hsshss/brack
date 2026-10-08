@@ -1,0 +1,2 @@
+// brack.exe's icon in Explorer; GLFW also gives the resource of this name to its windows.
+GLFW_ICON ICON "icon/brack.ico"

@@ -20,7 +20,8 @@ std::string Engine::saveSessionJson() {
         j["engine"] = {{"processSampleRate", config_.processSampleRate},
                        {"blockSize", config_.blockSize},
                        {"resamplerQuality", resamplerQualityName(config_.resamplerQuality)},
-                       {"pluginsInProcess", config_.pluginsInProcess}};
+                       {"pluginsInProcess", config_.pluginsInProcess},
+                       {"loadPluginsSerially", config_.loadPluginsSerially}};
         j["audio"] = {{"device", config_.audio.deviceName},
                       {"sampleRate", config_.audio.sampleRate},
                       {"channels", config_.audio.channels},
@@ -119,6 +120,7 @@ bool parseSession(const std::string& text, SessionData& out, std::string& error)
         if (!parseResamplerQuality(je.value("resamplerQuality", "high"), s.config.resamplerQuality))
             s.config.resamplerQuality = ResamplerQuality::High;
         s.config.pluginsInProcess = je.value("pluginsInProcess", false);
+        s.config.loadPluginsSerially = je.value("loadPluginsSerially", false);
         auto ja = j.value("audio", json::object());
         s.config.audio.deviceName = ja.value("device", "");
         s.config.audio.sampleRate = ja.value("sampleRate", 0u);
@@ -204,7 +206,8 @@ bool Engine::loadSessionJson(const std::string& text, std::string& error) {
     }
     // Made all at once, each in its own plugin host (those in this process one after another on
     // the host thread), then put in the rack in the session's order: a plugin that takes long to
-    // load, or to take its state, no longer holds up the others.
+    // load, or to take its state, no longer holds up the others. loadPluginsSerially makes them one
+    // after another instead.
     struct Made {
         std::unique_ptr<HostedPlugin> inst;
         bool stateRejected = false;
@@ -219,7 +222,7 @@ bool Engine::loadSessionJson(const std::string& text, std::string& error) {
         }
     };
     // On the host thread, other threads would wait for it forever (makePlugin() asks it things).
-    if (host_->isCurrent()) {
+    if (host_->isCurrent() || s.config.loadPluginsSerially) {
         for (size_t i = 0; i < made.size(); ++i) make(i);
     } else {
         parallelFor(made.size(), make);

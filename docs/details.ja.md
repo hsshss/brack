@@ -83,7 +83,7 @@ brack-cli play "C:\Program Files\Common Files\VST3\Synth.vst3" --plugin-id 01234
 brack-cli run my.json                 :: セッションを実行（Ctrl+C で終了）
 ```
 
-- オーディオ関連のオプション（`--device`、`--exclusive`、`--buffer`、`--rate`、`--block`、`--quality`、`--in-process`、`--duration`）は、`run` と `play` で共通です。一覧は `brack-cli help` で表示します。
+- オーディオ関連のオプション（`--device`、`--exclusive`、`--buffer`、`--rate`、`--block`、`--quality`、`--in-process`、`--load-serially`、`--duration`）は、`run` と `play` で共通です。一覧は `brack-cli help` で表示します。
 - `play` の `--gui` で、プラグインのエディタを開きます。Linux では `DISPLAY` が要ります。
 - `scan` は、Brack と違うアーキテクチャのプラグインに、そのアーキテクチャを添えます。
 
@@ -136,6 +136,7 @@ brack-cli run my.json                 :: セッションを実行（Ctrl+C で�
 - セッションには、そのプラグインが最後に保存できた状態を書き込みます。GUI の「Reload」（DLL では `brack_reload_plugin`）で、その状態から新しいプロセスで読み込み直せます。ID、名前、ルーティングはそのままです。
 - Brack が終わると、強制終了されたときも含めて、プラグインホストもすべて終わります。
 - セッションを開くと、プラグインの読み込みと活性化を一斉に行います。時間のかかるプラグインがあっても、ほかのプラグインを待たせません。
+  - 2 つ同時に読み込むと失敗するプラグインがあります。SOUND Canvas VA は、2 つ目が「Parameter file1 read error」のダイアログを出して止まるか、状態の読み込みで落ちます。そのときは「Load plugins one at a time」（GUI の設定、CLI の `--load-serially`、DLL の `load_plugins_serially`）をオンにすると、1 つずつ読み込んで活性化します。開くのは遅くなります。
 - プラグインごとにプロセスが 1 つ増えるので、読み込みにはプロセスの起動の分だけ時間がかかります。音声はブロックごとにプロセス間でやり取りし、プラグインどうしは並列に動きます。
 
 「Run plugins inside Brack」（GUI の設定、CLI の `--in-process`、DLL の `plugins_in_process`）をオンにすると、プラグインを Brack と同じプロセスで動かします（別のアーキテクチャのプラグインは除きます）。読み込みは速くなりますが、封じ込めは次の範囲に限られます。

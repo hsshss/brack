@@ -28,6 +28,7 @@ internal static unsafe partial class NativeMethods
         public uint block_size;
         public int resampler_quality;
         public int plugins_in_process;
+        public int load_plugins_serially;
     }
 
     [StructLayout(LayoutKind.Sequential)]

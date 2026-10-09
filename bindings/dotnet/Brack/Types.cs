@@ -95,4 +95,7 @@ public sealed record BrackConfig
     /// brack.dll). Faster to load, but a plugin that crashes outside a call from Brack, or hangs, takes the process
     /// down. Plugins built for another architecture run in a plugin host process anyway.</summary>
     public bool PluginsInProcess { get; init; }
+    /// <summary>A session's plugins are loaded, and activated, one after another rather than all at once. Slower,
+    /// for plugins that fail when two of them start together.</summary>
+    public bool LoadPluginsSerially { get; init; }
 }

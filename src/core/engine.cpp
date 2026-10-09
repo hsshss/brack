@@ -312,6 +312,11 @@ void Engine::activateSlots() {
             logError(s.cfg.id + ": " + e.what());
         }
     };
+    if (config_.loadPluginsSerially) {
+        for (PluginSlot* s : here) activate(*s);
+        for (PluginSlot* s : apart) activate(*s);
+        return;
+    }
     parallelFor(apart.size(), [&](size_t i) { activate(*apart[i]); }, [&] {
         for (PluginSlot* s : here) activate(*s);
     });

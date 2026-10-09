@@ -193,6 +193,12 @@ static void rack_edits(const char* synth) {
     CHECK(brack_get_config(e, &got) == BRACK_OK && got.plugins_in_process == 1);
     cfg.plugins_in_process = 0;
     CHECK(brack_set_config(e, &cfg) == BRACK_OK);
+    CHECK(brack_get_config(e, &got) == BRACK_OK && got.load_plugins_serially == 0);
+    cfg.load_plugins_serially = 1;
+    CHECK(brack_set_config(e, &cfg) == BRACK_OK);
+    CHECK(brack_get_config(e, &got) == BRACK_OK && got.load_plugins_serially == 1);
+    cfg.load_plugins_serially = 0;
+    CHECK(brack_set_config(e, &cfg) == BRACK_OK);
 
     /* A caller whose header has larger structs (a newer brack.h than this brack.dll): what the
      * library knows is read and written, and the rest of the caller's memory is left alone. */

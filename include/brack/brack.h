@@ -109,6 +109,9 @@ typedef struct brack_config {
      * process down. Plugins built for another architecture than brack.dll's run in a plugin host
      * process anyway. */
     int32_t plugins_in_process;
+    /* Non-zero: a session's plugins are loaded, and activated, one after another rather than all at
+     * once. Slower, for plugins that fail when two of them start together. */
+    int32_t load_plugins_serially;
 } brack_config;
 
 BRACK_API uint32_t BRACK_CALL brack_api_version(void);

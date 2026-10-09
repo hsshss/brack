@@ -1286,7 +1286,8 @@ private:
         return (a.audio.deviceName != b.audio.deviceName) + (a.audio.sampleRate != b.audio.sampleRate) +
                (a.audio.channels != b.audio.channels) + (a.audio.bufferFrames != b.audio.bufferFrames) +
                (a.audio.exclusive != b.audio.exclusive) + (a.processSampleRate != b.processSampleRate) +
-               (a.blockSize != b.blockSize) + (a.resamplerQuality != b.resamplerQuality) + (a.pluginsInProcess != b.pluginsInProcess);
+               (a.blockSize != b.blockSize) + (a.resamplerQuality != b.resamplerQuality) + (a.pluginsInProcess != b.pluginsInProcess) +
+               (a.loadPluginsSerially != b.loadPluginsSerially);
     }
 
     // A settings card's title line; the caller may place buttons at the right, then end() it.
@@ -1487,6 +1488,23 @@ private:
             ImGui::SetCursorScreenPos(ImVec2(p.x + px(16), p.y + px(14)));
             toggleSwitch("##inprocess", editCfg_.pluginsInProcess);
             drawText(ImVec2(p.x + px(16 + 40 + 12), p.y + px(15)), fonts.sans, 13, col::text, "Run plugins inside Brack");
+            dl->AddText(fonts.sans, px(12), ImVec2(p.x + px(16 + 40 + 12), p.y + px(36)), col::text3, why, nullptr, wrap);
+            box.end(20);
+        }
+        {
+            const char* why = "On: a session's plugins load, and start, one after another. Slower to open, for plugins "
+                              "that fail when two of them start together.";
+            const float wrap = std::min(px(560), width - px(40 + 32 + 40 + 12));
+            const float th = fonts.sans->CalcTextSizeA(px(12), FLT_MAX, wrap, why).y;
+            const float h = px(14 + 18 + 4 + 14) + th;
+            Row box = bodyRow(h / px(1));
+            const ImVec2 p(box.left(), box.top()), q(box.left() + width - px(40), box.top() + h);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(p, q, col::bg, px(10));
+            dl->AddRect(p, q, editCfg_.loadPluginsSerially != now.loadPluginsSerially ? col::midi : col::line, px(10));
+            ImGui::SetCursorScreenPos(ImVec2(p.x + px(16), p.y + px(14)));
+            toggleSwitch("##serially", editCfg_.loadPluginsSerially);
+            drawText(ImVec2(p.x + px(16 + 40 + 12), p.y + px(15)), fonts.sans, 13, col::text, "Load plugins one at a time");
             dl->AddText(fonts.sans, px(12), ImVec2(p.x + px(16 + 40 + 12), p.y + px(36)), col::text3, why, nullptr, wrap);
             box.end(20);
         }

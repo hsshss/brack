@@ -190,6 +190,9 @@ int RunTests()
               !config.PluginsInProcess, "configuration");
         engine.SetConfig(config with { PluginsInProcess = true });
         Check(engine.GetConfig().PluginsInProcess, "plugins in this process");
+        Check(!config.LoadPluginsSerially, "plugins loaded at once by default");
+        engine.SetConfig(config with { LoadPluginsSerially = true });
+        Check(engine.GetConfig().LoadPluginsSerially, "plugins loaded one after another");
         engine.SetConfig(config);
 
         engine.StartManual(48000, 2, 256);

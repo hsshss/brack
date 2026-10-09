@@ -66,6 +66,7 @@ void usage() {
         "  --block FRAMES     plugin block size\n"
         "  --quality Q        resampler quality: standard | high | ultra\n"
         "  --in-process       run plugins inside brack-cli, not in a plugin host process each\n"
+        "  --load-serially    load a session's plugins one after another, not all at once\n"
         "  --duration SEC     stop after SEC seconds instead of waiting for Ctrl+C");
 }
 
@@ -91,6 +92,7 @@ bool parseAudioOption(const std::string& a, Args& args, EngineConfig& cfg, bool&
     if (a == "--device") cfg.audio.deviceName = args.next();
     else if (a == "--exclusive") cfg.audio.exclusive = true;
     else if (a == "--in-process") cfg.pluginsInProcess = true;
+    else if (a == "--load-serially") cfg.loadPluginsSerially = true;
     else if (a == "--device-rate") return num(cfg.audio.sampleRate);
     else if (a == "--buffer") return num(cfg.audio.bufferFrames);
     else if (a == "--channels") return num(cfg.audio.channels);

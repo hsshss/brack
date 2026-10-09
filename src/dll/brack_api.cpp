@@ -198,6 +198,7 @@ BRACK_API int BRACK_CALL brack_set_config(brack_engine* e, const brack_config* g
             default: c.resamplerQuality = brack::ResamplerQuality::High; break;
         }
         c.pluginsInProcess = cfg->plugins_in_process != 0;
+        c.loadPluginsSerially = cfg->load_plugins_serially != 0;
         std::string err;
         return e->engine.setConfig(c, err) ? ok() : failed(err);
     });
@@ -224,6 +225,7 @@ BRACK_API int BRACK_CALL brack_get_config(brack_engine* e, brack_config* out) {
             default: cfg->resampler_quality = BRACK_SRC_HIGH; break;
         }
         cfg->plugins_in_process = c.pluginsInProcess ? 1 : 0;
+        cfg->load_plugins_serially = c.loadPluginsSerially ? 1 : 0;
         std::memcpy(out, &whole, sharedPart(whole));
         return ok();
     });

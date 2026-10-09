@@ -1009,6 +1009,42 @@ void parallelLoad(const std::string& synth) {
     for (auto& p : e.snapshot().plugins) CHECK(p.active == (p.id != "missing"));
 }
 
+// With loadPluginsSerially, a session's plugins load, and activate, one after another: two that each
+// take half a second take a second.
+void serialLoad(const std::string& synth) {
+    std::vector<uint8_t> state(12);
+    const float gain = 0.25f;
+    const uint32_t ms = 500;  // to load, and to activate
+    std::memcpy(state.data(), &gain, 4);
+    std::memcpy(state.data() + 4, &ms, 4);
+    std::memcpy(state.data() + 8, &ms, 4);
+    std::string path;
+    for (char c : synth) path += c == '\\' ? std::string("\\\\") : std::string(1, c);
+    std::string plugins;
+    for (const char* id : {"p0", "p1"}) {
+        if (!plugins.empty()) plugins += ",";
+        plugins += std::string("{\"id\":\"") + id + "\",\"path\":\"" + path + "\",\"state\":\"" + base64Encode(state) + "\"}";
+    }
+    Engine e;
+    std::string err;
+    const auto began = std::chrono::steady_clock::now();
+    CHECK(e.loadSessionJson("{\"format\":\"brack-session\",\"engine\":{\"loadPluginsSerially\":true},\"plugins\":[" + plugins +
+                                "]}",
+                            err));
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began);
+    std::printf("2 plugins taking %u ms each to load, one after another: %lld ms\n", ms, (long long)took.count());
+    CHECK(e.config().loadPluginsSerially);
+    CHECK(took.count() >= 2 * ms);
+    for (auto& p : e.snapshot().plugins) CHECK(p.loaded);
+
+    const auto starting = std::chrono::steady_clock::now();
+    CHECK(e.startManual(48000, 2, 256, err));
+    const auto started = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - starting);
+    std::printf("2 plugins taking %u ms each to activate, one after another: %lld ms\n", ms, (long long)started.count());
+    CHECK(started.count() >= 2 * ms);
+    for (auto& p : e.snapshot().plugins) CHECK(p.active);
+}
+
 int hold(const std::string& synth) {
     Engine e;
     std::string err;
@@ -1250,6 +1286,7 @@ int run(int argc, char** argv) {
     vst3RunLoop(argv[3]);
 #endif
     parallelLoad(synth);
+    serialLoad(synth);
     blockCost(synth, {64, 256}, {1, 8});
 
     setLogSink(nullptr);

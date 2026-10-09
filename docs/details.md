@@ -83,7 +83,7 @@ brack-cli play "C:\Program Files\Common Files\VST3\Synth.vst3" --plugin-id 01234
 brack-cli run my.json                 :: run a session (Ctrl+C to quit)
 ```
 
-- The audio options (`--device`, `--exclusive`, `--buffer`, `--rate`, `--block`, `--quality`, `--in-process`, `--duration`) are shared by `run` and `play`. `brack-cli help` lists them.
+- The audio options (`--device`, `--exclusive`, `--buffer`, `--rate`, `--block`, `--quality`, `--in-process`, `--load-serially`, `--duration`) are shared by `run` and `play`. `brack-cli help` lists them.
 - `--gui` on `play` opens the plugin's editor. On Linux it needs `DISPLAY`.
 - `scan` marks plugins of an architecture other than Brack's with their architecture.
 
@@ -136,6 +136,7 @@ Each plugin runs in a process of its own, separate from Brack (the plugin host `
 - The session gets the last state Brack could save from the plugin. "Reload" in the GUI (`brack_reload_plugin` in the DLL) loads the plugin again from that state in a new process. Its ID, name and routing stay the same.
 - When Brack ends, all plugin hosts end too, including when Brack is killed.
 - Opening a session loads and activates all plugins at once. A slow plugin does not hold up the others.
+  - Some plugins fail when two of them load at the same time. With SOUND Canvas VA, the second shows a "Parameter file1 read error" dialog and waits, or crashes while taking its state. "Load plugins one at a time" (a setting in the GUI, `--load-serially` in the CLI, `load_plugins_serially` in the DLL) then loads and activates them one after another, at the cost of opening more slowly.
 - Each plugin adds a process, so loading takes longer by the time a process takes to start. Audio passes between the processes block by block, and the plugins run in parallel.
 
 "Run plugins inside Brack" (a setting in the GUI, `--in-process` in the CLI, `plugins_in_process` in the DLL) runs plugins in Brack's own process (except plugins of other architectures). Loading is faster, but the containment covers only the following.

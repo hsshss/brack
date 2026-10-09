@@ -73,6 +73,7 @@ public sealed unsafe class BrackEngine : IDisposable
                 block_size = config.BlockSize,
                 resampler_quality = (int)config.ResamplerQuality,
                 plugins_in_process = config.PluginsInProcess ? 1 : 0,
+                load_plugins_serially = config.LoadPluginsSerially ? 1 : 0,
             };
             Interop.Check(NativeMethods.brack_set_config(_handle, &c));
         }
@@ -98,6 +99,7 @@ public sealed unsafe class BrackEngine : IDisposable
             BlockSize = c.block_size,
             ResamplerQuality = (ResamplerQuality)c.resampler_quality,
             PluginsInProcess = c.plugins_in_process != 0,
+            LoadPluginsSerially = c.load_plugins_serially != 0,
         };
     }
 

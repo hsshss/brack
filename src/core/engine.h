@@ -82,6 +82,9 @@ struct EngineConfig {
     // but a plugin that crashes outside a call from Brack, or hangs, takes Brack down with it.
     // Plugins built for another architecture than Brack's run in a plugin host process anyway.
     bool pluginsInProcess = false;
+    // A session's plugins are loaded and activated one after another rather than all at once, for
+    // plugins that fail when two of them start together (design notes, "起動").
+    bool loadPluginsSerially = false;
 };
 
 enum class EngineMode { Stopped, Device, Manual };

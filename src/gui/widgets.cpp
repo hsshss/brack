@@ -248,11 +248,12 @@ bool dbFader(const char* id, float& db, float minDb, float maxDb, float width, f
 }
 
 namespace {
+constexpr float kSegmentInset = 3;  // around the segments, inside the control
 float segmentWidth(const char* label) { return 2 * px(10) + textWidth(fonts.bold, 12, label); }
 }  // namespace
 
 float segmentedWidth(std::span<const char* const> labels) {
-    float w = 2 * px(3);
+    float w = 2 * px(kSegmentInset);
     for (const char* l : labels) w += segmentWidth(l);
     return w;
 }
@@ -260,15 +261,15 @@ float segmentedWidth(std::span<const char* const> labels) {
 bool segmented(const char* id, int& selected, std::span<const char* const> labels, ImU32 onBg, ImU32 onText) {
     ImGui::PushID(id);
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    const float w = segmentedWidth(labels), h = px(28), inner = px(22);
+    const float w = segmentedWidth(labels), h = px(len::control), inner = px(len::control - 2 * kSegmentInset);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), tint(col::bg), px(7));
     dl->AddRect(p, ImVec2(p.x + w, p.y + h), tint(col::border), px(7));
     bool changed = false;
-    float x = p.x + px(3);
+    float x = p.x + px(kSegmentInset);
     for (int i = 0; i < (int)labels.size(); ++i) {
         const float sw = segmentWidth(labels[i]);
-        const ImVec2 a(x, p.y + px(3));
+        const ImVec2 a(x, p.y + px(kSegmentInset));
         ImGui::SetCursorScreenPos(a);
         if (ImGui::InvisibleButton(labels[i], ImVec2(sw, inner)) && selected != i) {
             selected = i;
@@ -290,13 +291,14 @@ bool segmented(const char* id, int& selected, std::span<const char* const> label
 }
 
 bool toggleSwitch(const char* id, bool& on) {
-    const ImVec2 p = ImGui::GetCursorScreenPos(), q(p.x + px(34), p.y + px(20));
+    const ImVec2 p = ImGui::GetCursorScreenPos(), q(p.x + px(len::switchWidth), p.y + px(len::switchHeight));
     const bool clicked = ImGui::InvisibleButton(id, ImVec2(q.x - p.x, q.y - p.y));
     if (clicked) on = !on;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p, q, tint(on ? col::text : col::control), px(10));
-    dl->AddRect(p, q, tint(on ? col::text : col::borderTag), px(10));
-    dl->AddCircleFilled(ImVec2(p.x + px(on ? 24.0f : 10.0f), p.y + px(10)), px(7), tint(on ? col::onLight : col::text2));
+    const float r = len::switchHeight * 0.5f;  // the ends' radius; the knob's centre is that far in
+    dl->AddRectFilled(p, q, tint(on ? col::text : col::control), px(r));
+    dl->AddRect(p, q, tint(on ? col::text : col::borderTag), px(r));
+    dl->AddCircleFilled(ImVec2(p.x + px(on ? len::switchWidth - r : r), p.y + px(r)), px(r - 3), tint(on ? col::onLight : col::text2));
     return clicked;
 }
 

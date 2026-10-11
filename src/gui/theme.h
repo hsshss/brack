@@ -70,4 +70,15 @@ void setupStyle(float dpiScale);
 // A length of the design (CSS pixels of the mockups) in screen pixels.
 inline float px(float v) { return v * ImGui::GetStyle().FontScaleDpi; }
 
+// Lengths of the design that the views share.
+namespace len {
+constexpr float edge = 16;        // from the side of the window, a settings card or a dialog to its content
+constexpr float control = 28;     // fields, combos and segmented controls, and the buttons in their rows
+constexpr float button = 30;      // the buttons beside a view's title, and a dialog's
+constexpr float lineButton = 26;  // the buttons in the header, on a card's title line or a list's row
+constexpr float smallButton = 24; // the buttons on a MIDI input's row, and a banner's
+constexpr float icon = 16;        // an icon beside text
+constexpr float switchWidth = 34, switchHeight = 20;  // toggleSwitch()
+}  // namespace len
+
 }  // namespace brack::ui

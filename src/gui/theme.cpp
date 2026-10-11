@@ -73,7 +73,7 @@ void setupStyle(float dpiScale) {
     s.PopupRounding = 8;
     s.FrameRounding = 7;
     s.FrameBorderSize = 1;
-    s.FramePadding = ImVec2(8, 7.5f);
+    s.FramePadding = ImVec2(8, (len::control - s.FontSizeBase) * 0.5f);
     s.ItemSpacing = ImVec2(8, 6);
     s.ItemInnerSpacing = ImVec2(6, 4);
     s.ScrollbarSize = 12;

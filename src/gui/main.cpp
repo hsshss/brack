@@ -207,7 +207,7 @@ public:
         banners();
         nav();
         ImGui::SameLine(0, 0);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(16), px(12)));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(len::edge), px(12)));
         ImGui::BeginChild("view", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
         ImGui::PopStyleVar();
         switch (view_) {
@@ -372,15 +372,16 @@ private:
     // ---- header, transport, banners, side menu ----
 
     void header() {
+        constexpr float height = 36;
         ImGui::PushStyleColor(ImGuiCol_ChildBg, col::header);
-        ImGui::BeginChild("header", ImVec2(0, px(36)), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("header", ImVec2(0, px(height)), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::PopStyleColor();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 wp = ImGui::GetWindowPos();
         const float ww = ImGui::GetWindowWidth();
-        dl->AddLine(ImVec2(wp.x, wp.y + px(36) - 1), ImVec2(wp.x + ww, wp.y + px(36) - 1), col::line);
-        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(16), wp.y));
-        Row row(36, ww - px(32));
+        dl->AddLine(ImVec2(wp.x, wp.y + px(height) - 1), ImVec2(wp.x + ww, wp.y + px(height) - 1), col::line);
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(len::edge), wp.y));
+        Row row(height, ww - 2 * px(len::edge));
 
         const ImVec2 logo = row.next(px(22), px(22));
         auto box = [&](float x, float y, float w, float h, float r, ImU32 c) {
@@ -397,14 +398,14 @@ private:
         row.gap(16);
 
         const float sw = px(10 + 6 + 14 + 10) + textWidth(fonts.sans, 13, "Session");
-        const ImVec2 sp = row.next(sw, px(26));
+        const ImVec2 sp = row.next(sw, px(len::lineButton));
         ImGui::SetCursorScreenPos(sp);
-        if (ImGui::InvisibleButton("##session", ImVec2(sw, px(26)))) ImGui::OpenPopup("session");
+        if (ImGui::InvisibleButton("##session", ImVec2(sw, px(len::lineButton)))) ImGui::OpenPopup("session");
         if (ImGui::IsItemHovered() || ImGui::IsPopupOpen("session"))
-            dl->AddRectFilled(sp, ImVec2(sp.x + sw, sp.y + px(26)), col::card, px(6));
-        drawText(ImVec2(sp.x + px(10), sp.y + px(6.5f)), fonts.sans, 13, col::text2, "Session");
-        drawIcon(dl, Icon::ChevronDown, ImVec2(sp.x + sw - px(24), sp.y + px(6)), px(14), col::text2);
-        ImGui::SetNextWindowPos(ImVec2(sp.x, sp.y + px(30)));
+            dl->AddRectFilled(sp, ImVec2(sp.x + sw, sp.y + px(len::lineButton)), col::card, px(6));
+        drawText(ImVec2(sp.x + px(10), sp.y + px((len::lineButton - 13) * 0.5f)), fonts.sans, 13, col::text2, "Session");
+        drawIcon(dl, Icon::ChevronDown, ImVec2(sp.x + sw - px(24), sp.y + px((len::lineButton - 14) * 0.5f)), px(14), col::text2);
+        ImGui::SetNextWindowPos(ImVec2(sp.x, sp.y + px(len::lineButton + 4)));
         if (beginPopupMenu("session")) {
             if (ImGui::MenuItem("New")) {
                 runAsync("Clearing the rack", [this] { engine_.clear(); });
@@ -452,20 +453,21 @@ private:
     }
 
     void transport() {
+        constexpr float height = 72, controls = 32;  // the bar; its first line (power button, fader, meters)
         ImGui::PushStyleColor(ImGuiCol_ChildBg, col::transport);
-        ImGui::BeginChild("transport", ImVec2(0, px(72)), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("transport", ImVec2(0, px(height)), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::PopStyleColor();
         const ImVec2 wp = ImGui::GetWindowPos();
         const float ww = ImGui::GetWindowWidth();
-        ImGui::GetWindowDrawList()->AddLine(ImVec2(wp.x, wp.y + px(72) - 1), ImVec2(wp.x + ww, wp.y + px(72) - 1), col::line);
-        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(16), wp.y + px(8)));
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(wp.x, wp.y + px(height) - 1), ImVec2(wp.x + ww, wp.y + px(height) - 1), col::line);
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(len::edge), wp.y + px(8)));
 
         const bool running = snap_.mode != EngineMode::Stopped;
-        Row row(32, ww - px(32));
+        Row row(controls, ww - 2 * px(len::edge));
         const ButtonLook power = running ? ButtonLook{col::runningBg, col::runningBorder, col::audio} : ButtonLook{col::raised, col::borderStrong, col::text};
         const char* label = running ? "Running###audio" : "Start audio###audio";
-        row.place(buttonWidth(label, power, 32, Icon::Power), px(32));
-        if (button(label, power, 32, Icon::Power)) {
+        row.place(buttonWidth(label, power, controls, Icon::Power), px(controls));
+        if (button(label, power, controls, Icon::Power)) {
             runAsync(running ? "Stopping audio" : "Starting audio", [this, running] {
                 std::string err;
                 if (running) engine_.stop();
@@ -482,20 +484,20 @@ private:
         const float db = masterFader(px(220));
         row.gap(12);
         char value[32];
-        if (db <= kMasterMinDb) std::snprintf(value, sizeof value, "-inf dB");
+        if (db <= kFaderMinDb) std::snprintf(value, sizeof value, "-inf dB");
         else std::snprintf(value, sizeof value, "%.1f dB", db);
-        const ImVec2 vp = row.next(px(56), px(12));
-        drawText(ImVec2(vp.x + px(56) - textWidth(fonts.mono, 12, value), vp.y), fonts.mono, 12, col::text, value);
+        const ImVec2 vp = row.next(px(kDbValueWidth), px(12));
+        drawText(ImVec2(vp.x + px(kDbValueWidth) - textWidth(fonts.mono, 12, value), vp.y), fonts.mono, 12, col::text, value);
         ImGui::PopStyleVar();
 
         if (running && !snap_.outputPeaks.empty()) {
             row.gap(20);
             const float w = std::min(px(260), row.remaining());
-            meters(row.next(w, px(32)), w);
+            meters(row.next(w, px(controls)), w, px(controls));
         }
         row.end(6);
 
-        Row status(18, ww - px(32));
+        Row status(18, ww - 2 * px(len::edge));
         auto item = [&](const std::string& s, ImFont* f, ImU32 c) {
             drawText(status.next(textWidth(f, 12, s), px(12)), f, 12, c, s);
             status.gap(16);
@@ -524,28 +526,31 @@ private:
         return s;
     }
 
-    static constexpr float kMasterMinDb = -60.0f;
+    // The range of the volume faders (the master's and the routes'), and the width of the dB
+    // value beside one.
+    static constexpr float kFaderMinDb = -60.0f, kFaderMaxDb = 12.0f;
+    static constexpr float kDbValueWidth = 56;
 
     // Master volume in dB; the left end mutes. It applies at once (no worker round trip),
     // and the snapshot reads it live, so the fader never lags behind. Returns the dB shown.
     float masterFader(float width) {
         const float gain = snap_.masterGain;
-        float db = gain > 0.0f ? std::max(20.0f * std::log10(gain), kMasterMinDb) : kMasterMinDb;
-        if (dbFader("##master", db, kMasterMinDb, 12.0f, width, 16, col::text)) {
-            const float set = db <= kMasterMinDb ? 0.0f : std::pow(10.0f, db / 20.0f);
+        float db = gain > 0.0f ? std::max(20.0f * std::log10(gain), kFaderMinDb) : kFaderMinDb;
+        if (dbFader("##master", db, kFaderMinDb, kFaderMaxDb, width, 16, col::text)) {
+            const float set = db <= kFaderMinDb ? 0.0f : std::pow(10.0f, db / 20.0f);
             engine_.setMasterGain(set);
             snap_.masterGain = set;
         }
         return db;
     }
 
-    // One bar per output channel (up to 8) in a box 32 tall; numbered while there is room.
-    void meters(ImVec2 p, float w) {
+    // One bar per output channel (up to 8) in a box w x h; numbered while there is room.
+    void meters(ImVec2 p, float w, float h) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const size_t n = std::min<size_t>(snap_.outputPeaks.size(), 8);
-        const float pitch = std::min(px(10), px(32) / n), bar = std::max(1.0f, std::round(pitch * 0.6f));
+        const float pitch = std::min(px(10), h / n), bar = std::max(1.0f, std::round(pitch * 0.6f));
         const bool numbered = n <= 4;
-        const float x0 = p.x + (numbered ? px(18) : 0), top = p.y + (px(32) - pitch * n) * 0.5f;
+        const float x0 = p.x + (numbered ? px(18) : 0), top = p.y + (h - pitch * n) * 0.5f;
         for (size_t c = 0; c < n; ++c) {
             const float y = std::round(top + c * pitch + (pitch - bar) * 0.5f);
             if (numbered)
@@ -561,7 +566,7 @@ private:
     void banners() {
         auto band = [](const char* id, ImU32 bg, ImU32 line) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, bg);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(16), px(6)));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(len::edge), px(6)));
             ImGui::BeginChild(id, ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
                               ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::PopStyleVar();
@@ -576,15 +581,15 @@ private:
         };
         if (!lastError_.empty()) {
             band("error", col::errorBg, col::errorBorder);
-            const float w = ImGui::GetContentRegionAvail().x, wrap = w - px(16 + 12 + 12 + 24);
+            const float w = ImGui::GetContentRegionAvail().x, wrap = w - px(len::icon + 12 + 12 + len::smallButton);
             const float th = fonts.sans->CalcTextSizeA(px(13), FLT_MAX, wrap, lastError_.c_str()).y;
-            Row row(std::max(24.0f, th / px(1)), w);
-            drawIcon(ImGui::GetWindowDrawList(), Icon::Warning, row.next(px(16), px(16)), px(16), col::error);
+            Row row(std::max(len::smallButton, th / px(1)), w);
+            drawIcon(ImGui::GetWindowDrawList(), Icon::Warning, row.next(px(len::icon), px(len::icon)), px(len::icon), col::error);
             row.gap(12);
             const ImVec2 tp = row.next(wrap, th);
             ImGui::GetWindowDrawList()->AddText(fonts.sans, px(13), tp, col::error, lastError_.c_str(), nullptr, wrap);
-            row.placeRight(px(24), px(24));
-            if (button("##dismiss", ButtonLook{0, 0, col::error}, 24, Icon::Close)) lastError_.clear();
+            row.placeRight(px(len::smallButton), px(len::smallButton));
+            if (button("##dismiss", ButtonLook{0, 0, col::error}, len::smallButton, Icon::Close)) lastError_.clear();
             ImGui::SetItemTooltip("Dismiss");
             row.end();
             endBand();
@@ -592,7 +597,7 @@ private:
         if (snap_.deviceStalled) {
             band("stalled", col::warnBg, col::warnBorder);
             Row row(22);
-            drawIcon(ImGui::GetWindowDrawList(), Icon::Warning, row.next(px(16), px(16)), px(16), col::warn);
+            drawIcon(ImGui::GetWindowDrawList(), Icon::Warning, row.next(px(len::icon), px(len::icon)), px(len::icon), col::warn);
             row.gap(12);
             const char* msg = "Output device disconnected. Plugins keep running on an internal clock until it returns.";
             drawText(row.next(textWidth(fonts.sans, 13, msg), px(13)), fonts.sans, 13, col::warn, msg);
@@ -607,21 +612,22 @@ private:
     }
 
     void nav() {
-        ImGui::BeginChild("nav", ImVec2(px(148), 0), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        constexpr float width = 148, inset = 8, itemHeight = 32, itemWidth = width - 2 * inset;
+        ImGui::BeginChild("nav", ImVec2(px(width), 0), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 wp = ImGui::GetWindowPos();
-        dl->AddLine(ImVec2(wp.x + px(148) - 1, wp.y), ImVec2(wp.x + px(148) - 1, wp.y + ImGui::GetWindowHeight()), col::line);
-        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(8), wp.y + px(8)));
+        dl->AddLine(ImVec2(wp.x + px(width) - 1, wp.y), ImVec2(wp.x + px(width) - 1, wp.y + ImGui::GetWindowHeight()), col::line);
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(inset), wp.y + px(inset)));
         for (const ViewEntry& v : kViews) {
-            Row row(32, px(132));
-            const ImVec2 p = row.next(px(132), px(32));
+            Row row(itemHeight, px(itemWidth));
+            const ImVec2 p = row.next(px(itemWidth), px(itemHeight));
             ImGui::SetCursorScreenPos(p);
-            if (ImGui::InvisibleButton(v.label, ImVec2(px(132), px(32)))) view_ = v.view;
+            if (ImGui::InvisibleButton(v.label, ImVec2(px(itemWidth), px(itemHeight)))) view_ = v.view;
             const bool on = view_ == v.view;
             if (on || ImGui::IsItemHovered())
-                dl->AddRectFilled(p, ImVec2(p.x + px(132), p.y + px(32)), on ? col::raised : col::card, px(7));
+                dl->AddRectFilled(p, ImVec2(p.x + px(itemWidth), p.y + px(itemHeight)), on ? col::raised : col::card, px(7));
             const ImU32 c = on ? col::text : col::text2;
-            drawIcon(dl, v.icon, ImVec2(p.x + px(10), p.y + px(8)), px(16), c);
+            drawIcon(dl, v.icon, ImVec2(p.x + px(10), p.y + px((itemHeight - len::icon) * 0.5f)), px(len::icon), c);
             drawText(ImVec2(p.x + px(34), p.y + px(9.5f)), fonts.sans, 13, c, v.label);
             row.end(2);
         }
@@ -641,11 +647,11 @@ private:
 
     void rackView() {
         Row title = viewTitle("Rack");
-        title.placeRight(buttonWidth("Add instrument", look::primary, 30, Icon::Plus), px(30));
-        if (button("Add instrument", look::primary, 30, Icon::Plus)) openAdd_ = true;
+        title.placeRight(buttonWidth("Add instrument", look::primary, len::button, Icon::Plus), px(len::button));
+        if (button("Add instrument", look::primary, len::button, Icon::Plus)) openAdd_ = true;
         title.gapRight(8);
-        title.placeRight(buttonWidth("From file...", look::outline, 30, Icon::File), px(30));
-        if (button("From file...", look::outline, 30, Icon::File)) chooseFile();
+        title.placeRight(buttonWidth("From file...", look::outline, len::button, Icon::File), px(len::button));
+        if (button("From file...", look::outline, len::button, Icon::File)) chooseFile();
         title.end(12);
 
         sectionHeader("INSTRUMENTS", col::text, "Drag to reorder · double-click a name to rename, a volume for 0 dB");
@@ -712,7 +718,7 @@ private:
                     if (!engine_.movePlugin(from, index, err)) error(err);
                 });
         }
-        const ImVec2 grip = line.next(px(20), px(28));
+        const ImVec2 grip = line.next(px(20), line.height());
         drawIcon(dl, Icon::Grip, ImVec2(grip.x - px(2), grip.y + px(2)), px(24), col::faint);
         line.gap(10);
         if (renaming_ == p.id) {
@@ -757,8 +763,8 @@ private:
         }
         line.gap(14);
 
-        line.placeRight(px(26), px(26));
-        if (button("##more", look::ghost, 26, Icon::More)) ImGui::OpenPopup("more");
+        line.placeRight(px(len::lineButton), px(len::lineButton));
+        if (button("##more", look::ghost, len::lineButton, Icon::More)) ImGui::OpenPopup("more");
         if (beginPopupMenu("more")) {
             if (ImGui::MenuItem("Rename")) startRename(p);
             if (canReload && ImGui::MenuItem("Reload")) reload(p);
@@ -773,11 +779,11 @@ private:
         line.gapRight(6);
         if (canReload) {
             const ButtonLook& l = p.crashed ? look::danger : look::dangerOutline;
-            line.placeRight(buttonWidth("Reload", l, 26, Icon::Reload, 12), px(26));
-            if (button("Reload", l, 26, Icon::Reload, 12)) reload(p);
+            line.placeRight(buttonWidth("Reload", l, len::lineButton, Icon::Reload, 12), px(len::lineButton));
+            if (button("Reload", l, len::lineButton, Icon::Reload, 12)) reload(p);
         } else if (p.hasGui && !p.crashed) {
-            line.placeRight(buttonWidth("Editor", look::filled, 26, Icon::Editor, 12), px(26));
-            if (button("Editor", look::filled, 26, Icon::Editor, 12))
+            line.placeRight(buttonWidth("Editor", look::filled, len::lineButton, Icon::Editor, 12), px(len::lineButton));
+            if (button("Editor", look::filled, len::lineButton, Icon::Editor, 12))
                 runAsync("Opening the editor", [this, id = p.id] {
                     std::string err;
                     if (!engine_.setPluginGuiVisible(id, true, err)) error(err);
@@ -813,7 +819,8 @@ private:
         line.end(2);
 
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * (p.crashed ? 0.55f : 1.0f));
-        const float bodyX = x0 + px(30), bodyW = width - px(30);
+        constexpr float indent = 30;  // the body, past the grip
+        const float bodyX = x0 + px(indent), bodyW = width - px(indent);
         auto bodyRow = [&](float maxWidth) {
             ImGui::SetCursorScreenPos(ImVec2(bodyX, ImGui::GetCursorScreenPos().y));
             return Row(24, std::min(bodyW, maxWidth));
@@ -867,11 +874,11 @@ private:
                     // show the edited value: the stale one would pull the thumb back.
                     const float snapDb = 20.0f * std::log10(std::max(it->gain, 1e-4f));
                     float db = key == gainKey_ ? gainDb_ : snapDb;
-                    const ImVec2 vp = row.nextRight(px(56), px(12));
+                    const ImVec2 vp = row.nextRight(px(kDbValueWidth), px(12));
                     row.gapRight(8);
                     const float fw = row.remaining();
                     row.place(fw, px(22));
-                    const bool moved = dbFader("##gain", db, -60.0f, 12.0f, fw, 14, col::faint);
+                    const bool moved = dbFader("##gain", db, kFaderMinDb, kFaderMaxDb, fw, 14, col::faint);
                     if (moved) {
                         it->gain = std::pow(10.0f, db / 20.0f);
                         changed = true;
@@ -885,7 +892,7 @@ private:
                     }
                     char value[32];
                     std::snprintf(value, sizeof value, "%.1f dB", db);
-                    drawText(ImVec2(vp.x + px(56) - textWidth(fonts.mono, 12, value), vp.y), fonts.mono, 12, col::text2, value);
+                    drawText(ImVec2(vp.x + px(kDbValueWidth) - textWidth(fonts.mono, 12, value), vp.y), fonts.mono, 12, col::text2, value);
                 }
                 row.end();
                 ImGui::PopID();
@@ -964,6 +971,7 @@ private:
     }
 
     void sourcesCard() {
+        constexpr float left = 12, right = 8;  // the rows' content from the card's sides
         beginCard("sources", 0, col::card, col::border, ImVec2(0, 0));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float w = ImGui::GetContentRegionAvail().x;
@@ -985,8 +993,8 @@ private:
                     std::string err;
                     if (!engine_.moveMidiSource(from, index, err)) error(err);
                 });
-            row.gap(12);
-            row.gapRight(8);
+            row.gap(left);
+            row.gapRight(right);
 
             const char* tag = s.kind == MidiSourceKind::Virtual ? "VIRTUAL" : s.kind == MidiSourceKind::Hardware ? "DEVICE" : "API";
             const ImVec2 tsz = badgeSize(tag, fonts.bold, 10, 6);
@@ -994,8 +1002,8 @@ private:
             badge(tp, tag, fonts.bold, 10, 0, s.ok ? col::borderTag : col::errorTag, s.ok ? col::text2 : col::error, 6);
             row.gap(10);
 
-            row.placeRight(px(24), px(24));
-            if (button("##remove", ButtonLook{0, 0, col::text3}, 24, Icon::Close)) {
+            row.placeRight(px(len::smallButton), px(len::smallButton));
+            if (button("##remove", ButtonLook{0, 0, col::text3}, len::smallButton, Icon::Close)) {
                 runAsync("Removing " + s.id, [this, id = s.id] {
                     std::string err;
                     if (!engine_.removeMidiSource(id, err)) error(err);
@@ -1004,8 +1012,8 @@ private:
             ImGui::SetItemTooltip("Remove");
             row.gapRight(10);
             if (!s.ok && s.kind != MidiSourceKind::Api) {
-                row.placeRight(buttonWidth("Retry", look::dangerOutline, 24, Icon::None, 12), px(24));
-                if (button("Retry", look::dangerOutline, 24, Icon::None, 12)) {
+                row.placeRight(buttonWidth("Retry", look::dangerOutline, len::smallButton, Icon::None, 12), px(len::smallButton));
+                if (button("Retry", look::dangerOutline, len::smallButton, Icon::None, 12)) {
                     runAsync("Reopening " + s.id, [this, id = s.id] {
                         std::string err;
                         if (!engine_.reopenMidiSource(id, err)) error(err);
@@ -1036,15 +1044,15 @@ private:
         bool canAdd = kind != MidiSourceKind::Hardware || newInput_ < (int)midiInputs_.size();
         if (kind == MidiSourceKind::Virtual && !virtualAvailable_) canAdd = false;
         Row add(40, w);
-        add.gap(12);
-        add.gapRight(8);
+        add.gap(left);
+        add.gapRight(right);
         static const char* const kinds[] = {"Device", "Virtual port", "API"};  // as kNewKinds
-        add.place(segmentedWidth(kinds), px(28));
+        add.place(segmentedWidth(kinds), px(len::control));
         segmented("##kind", newKind_, kinds);
         add.gap(8);
-        add.placeRight(buttonWidth("Add input", look::filled, 28), px(28));
+        add.placeRight(buttonWidth("Add input", look::filled, len::control), px(len::control));
         ImGui::BeginDisabled(!canAdd);
-        if (button("Add input", look::filled, 28)) {
+        if (button("Add input", look::filled, len::control)) {
             MidiSourceConfig sc;
             sc.kind = kind;
             if (kind == MidiSourceKind::Virtual) sc.name = newVirtualName_;
@@ -1058,8 +1066,8 @@ private:
         ImGui::EndDisabled();
         add.gapRight(8);
         if (kind == MidiSourceKind::Hardware) {
-            add.placeRight(px(28), px(28));
-            if (button("##refresh", look::outlineMuted, 28, Icon::Reload)) refreshDevices();
+            add.placeRight(px(len::control), px(len::control));
+            if (button("##refresh", look::outlineMuted, len::control, Icon::Reload)) refreshDevices();
             ImGui::SetItemTooltip("Refresh ports");
             add.gapRight(8);
         }
@@ -1087,8 +1095,8 @@ private:
                       "quitting Brack while one exists, makes Windows MIDI Services stop responding until Windows is "
                       "restarted. Fixed by the late-November 2026 Windows update.";
         if (!warning.empty()) {
-            const ImVec2 p(ImGui::GetCursorScreenPos().x + px(12), ImGui::GetCursorScreenPos().y);
-            const float wrap = w - px(24);
+            const ImVec2 p(ImGui::GetCursorScreenPos().x + px(left), ImGui::GetCursorScreenPos().y);
+            const float wrap = w - px(2 * left);
             const float h = fonts.sans->CalcTextSizeA(px(12), FLT_MAX, wrap, warning.c_str()).y;
             dl->AddText(fonts.sans, px(12), p, col::warn, warning.c_str(), nullptr, wrap);
             ImGui::Dummy(ImVec2(w, h + px(8)));
@@ -1238,22 +1246,24 @@ private:
 
     // `outputs`: "Off", then one label per output channel.
     void audioCard(const EngineSnapshot::Plugin& p, std::span<const char* const> outputs, float width) {
+        // From the card's sides to its content; the same gap above, between and below the channels.
+        constexpr float inset = 12, gap = 8, titleHeight = 30;
         ImGui::PushID(p.id.c_str());
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * (p.crashed ? 0.6f : 1.0f));
         beginCard("outputs", width, col::card, col::border, ImVec2(0, 0));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float w = ImGui::GetContentRegionAvail().x;
-        Row title(30, w);
-        title.gap(12);
+        Row title(titleHeight, w);
+        title.gap(inset);
         const std::string name = displayName(p);
         drawText(title.next(textWidth(fonts.bold, 13, name), px(13)), fonts.bold, 13, col::text, name);
         title.gap(8);
         std::string note = p.audioOutputs.size() == 1 ? p.audioOutputs[0].name : "";
         if (p.crashed) note += note.empty() ? "crashed" : " · crashed";
         drawText(title.next(textWidth(fonts.sans, 12, note), px(12)), fonts.sans, 12, col::text3, note);
-        const float ly = title.top() + px(30) - 1, lx = ImGui::GetWindowPos().x;
+        const float ly = title.top() + px(titleHeight) - 1, lx = ImGui::GetWindowPos().x;
         dl->AddLine(ImVec2(lx, ly), ImVec2(lx + ImGui::GetWindowWidth(), ly), tint(col::line));
-        title.end(8);
+        title.end(gap);
 
         float labelW = px(16);
         for (uint32_t port = 0; port < p.audioOutputs.size(); ++port)
@@ -1264,16 +1274,16 @@ private:
         for (uint32_t port = 0; port < p.audioOutputs.size(); ++port) {
             for (uint32_t ch = 0; ch < p.audioOutputs[port].channels; ++ch) {
                 ImGui::PushID(int(port * 1000 + ch));
-                Row row(28, w);
-                row.gap(12);
-                row.gapRight(12);
+                Row row(len::control, w);
+                row.gap(inset);
+                row.gapRight(inset);
                 drawText(row.next(labelW, px(12)), fonts.mono, 12, col::text2, channelLabel(p, port, ch));
                 row.gap(10);
                 auto it = findRoute(mine, port, ch);
                 int sel = it == mine.end() ? 0 : (int)it->output + 1;
                 const int was = sel;
                 if (segmentedWidth(outputs) <= row.remaining()) {
-                    row.place(segmentedWidth(outputs), px(28));
+                    row.place(segmentedWidth(outputs), px(len::control));
                     segmented("##out", sel, outputs, sel == 0 ? col::controlOn : col::audio, sel == 0 ? col::text : col::onAudio);
                 } else {  // too many outputs to show side by side
                     const float cw = std::min(row.remaining(), px(140));
@@ -1291,15 +1301,15 @@ private:
                     else mine.push_back({p.id, port, ch, uint32_t(sel - 1), 1.0f});
                     changed = true;
                 }
-                row.end(8);
+                row.end(gap);
                 ImGui::PopID();
             }
         }
         if (p.audioOutputs.empty()) {
-            Row row(28, w);
-            row.gap(12);
+            Row row(len::control, w);
+            row.gap(inset);
             drawText(row.next(px(100), px(12)), fonts.sans, 12, col::text3, "No audio outputs");
-            row.end(8);
+            row.end(gap);
         }
         if (changed) {
             runAsync("Routing", [this, id = p.id, mine] {
@@ -1324,10 +1334,11 @@ private:
 
     // A settings card's title line; the caller may place buttons at the right, then end() it.
     static Row cardTitle(const char* title, float width) {
-        Row row(36, width);
-        const float y = row.top() + px(36) - 1;
+        constexpr float height = 36;
+        Row row(height, width);
+        const float y = row.top() + px(height) - 1;
         ImGui::GetWindowDrawList()->AddLine(ImVec2(row.left(), y), ImVec2(row.left() + width, y), tint(col::line));
-        row.gap(16);
+        row.gap(len::edge);
         row.gapRight(8);
         drawText(row.next(textWidth(fonts.bold, 14, title), px(14)), fonts.bold, 14, col::text, title);
         return row;
@@ -1336,12 +1347,14 @@ private:
     void settingsView() {
         const float width = std::min(ImGui::GetContentRegionAvail().x, px(860));
         viewTitle("Audio settings", "Changes wait here until you apply them.").end(12);
+        constexpr float cardGap = 12, titleGap = 10, rowGap = 8;
         auto& a = editCfg_.audio;
         const EngineConfig& now = snap_.config;
         float x0 = 0;
+        const float bodyW = width - 2 * px(len::edge);
         auto bodyRow = [&](float h) {
-            ImGui::SetCursorScreenPos(ImVec2(x0 + px(16), ImGui::GetCursorScreenPos().y));
-            return Row(h, width - px(32));
+            ImGui::SetCursorScreenPos(ImVec2(x0 + px(len::edge), ImGui::GetCursorScreenPos().y));
+            return Row(h, bodyW);
         };
         auto label = [&](Row& row, const char* s) { drawText(row.next(px(216), px(13)), fonts.sans, 13, col::text2, s); };
         auto note = [&](Row& row, const char* s) { drawText(row.next(textWidth(fonts.sans, 12, s), px(12)), fonts.sans, 12, col::text3, s); };
@@ -1368,12 +1381,12 @@ private:
 
         beginCard("device", width, col::card, col::border, ImVec2(0, 0), 12);
         x0 = ImGui::GetCursorScreenPos().x;
-        cardTitle("Output device", width).end(10);
+        cardTitle("Output device", width).end(titleGap);
         {
-            Row row = bodyRow(28);
+            Row row = bodyRow(len::control);
             label(row, "Device");
-            row.placeRight(px(28), px(28));
-            if (button("##refresh", look::outlineMuted, 28, Icon::Reload)) refreshDevices();
+            row.placeRight(px(len::control), px(len::control));
+            if (button("##refresh", look::outlineMuted, len::control, Icon::Reload)) refreshDevices();
             ImGui::SetItemTooltip("Refresh devices");
             row.gapRight(8);
             const float cw = row.remaining();
@@ -1388,20 +1401,20 @@ private:
                 ImGui::EndCombo();
             }
             ImGui::PopStyleColor();
-            row.end(8);
+            row.end(rowGap);
         }
 #ifdef _WIN32
         {
             Row row = bodyRow(22);
             label(row, "WASAPI exclusive mode");
-            row.place(px(34), px(20));
+            row.place(px(len::switchWidth), px(len::switchHeight));
             toggleSwitch("##exclusive", a.exclusive);
             row.gap(10);
             note(row, "Brack takes the device for itself and picks its rate. Windows only.");
-            row.end(8);
+            row.end(rowGap);
         }
         {
-            Row row = bodyRow(28);
+            Row row = bodyRow(len::control);
             label(row, "Device sample rate");
             row.place(px(200), ImGui::GetFrameHeight());
             ImGui::BeginDisabled(!a.exclusive);
@@ -1413,14 +1426,14 @@ private:
                 row.gap(12);
                 note(row, "Shared mode runs at the device mix rate.");
             }
-            row.end(8);
+            row.end(rowGap);
         }
 #else
         {
             Row row = bodyRow(20);
             label(row, "Device sample rate");
             note(row, "The device runs at the sound server's rate.");
-            row.end(8);
+            row.end(rowGap);
         }
 #endif
         {
@@ -1432,7 +1445,7 @@ private:
             drawText(labels.next(second, px(13)), fonts.sans, 13, col::text2, "Buffer");
             drawText(labels.next(px(200), px(13)), fonts.sans, 13, col::text2, "Output channels");
             labels.end(2);
-            Row row = bodyRow(28);
+            Row row = bodyRow(len::control);
             row.place(px(96), ImGui::GetFrameHeight());
             edited(a.bufferFrames != now.audio.bufferFrames);
             uintInput("##buffer", a.bufferFrames, 16, 8192);
@@ -1447,17 +1460,17 @@ private:
             row.end(12);
         }
         endCard();
-        spaceBelow(12);
+        spaceBelow(cardGap);
 
         beginCard("processing", width, col::card, col::border, ImVec2(0, 0), 12);
         x0 = ImGui::GetCursorScreenPos().x;
-        cardTitle("Plugin processing", width).end(10);
+        cardTitle("Plugin processing", width).end(titleGap);
         {
             Row labels = bodyRow(20);
             drawText(labels.next(px(232), px(13)), fonts.sans, 13, col::text2, "Processing sample rate");
             drawText(labels.next(px(200), px(13)), fonts.sans, 13, col::text2, "Block size");
             labels.end(2);
-            Row row = bodyRow(28);
+            Row row = bodyRow(len::control);
             row.place(px(200), ImGui::GetFrameHeight());
             edited(editCfg_.processSampleRate != now.processSampleRate);
             rateCombo("##prate", editCfg_.processSampleRate, "Same as output");
@@ -1506,47 +1519,41 @@ private:
             note(hint, latency);
             hint.end(10);
         }
-        {
-            const char* why = "Off: each plugin runs in a process of its own, so one that crashes or hangs stops only itself "
-                              "and can be reloaded. Plugins for the other architecture always run on their own.";
-            const float wrap = std::min(px(560), width - px(32 + 24 + 34 + 10));
+        // A switch in a box of its own, with its name and what it does; outlined in amber while
+        // edited.
+        auto option = [&](const char* id, bool& on, bool applied, const char* name, const char* why, float below) {
+            constexpr float padX = 12, padY = 8, gap = 10, lines = 2;  // `lines`: between the name and `why`
+            const float textX = padX + len::switchWidth + gap;
+            const float wrap = std::min(px(560), bodyW - px(textX + padX));
             const float th = fonts.sans->CalcTextSizeA(px(12), FLT_MAX, wrap, why).y;
-            const float h = px(8 + 20 + 2 + 8) + th;
+            const float h = px(padY + len::switchHeight + lines + padY) + th;
             Row box = bodyRow(h / px(1));
-            const ImVec2 p(box.left(), box.top()), q(box.left() + width - px(32), box.top() + h);
+            const ImVec2 p(box.left(), box.top()), q(box.left() + bodyW, box.top() + h);
             ImDrawList* dl = ImGui::GetWindowDrawList();
             dl->AddRectFilled(p, q, col::bg, px(8));
-            dl->AddRect(p, q, editCfg_.pluginsInProcess != now.pluginsInProcess ? col::midi : col::line, px(8));
-            ImGui::SetCursorScreenPos(ImVec2(p.x + px(12), p.y + px(8)));
-            toggleSwitch("##inprocess", editCfg_.pluginsInProcess);
-            drawText(ImVec2(p.x + px(12 + 34 + 10), p.y + px(11.5f)), fonts.sans, 13, col::text, "Run plugins inside Brack");
-            dl->AddText(fonts.sans, px(12), ImVec2(p.x + px(12 + 34 + 10), p.y + px(30)), col::text3, why, nullptr, wrap);
-            box.end(8);
-        }
-        {
-            const char* why = "On: a session's plugins load, and start, one after another. Slower to open, for plugins "
-                              "that fail when two of them start together.";
-            const float wrap = std::min(px(560), width - px(32 + 24 + 34 + 10));
-            const float th = fonts.sans->CalcTextSizeA(px(12), FLT_MAX, wrap, why).y;
-            const float h = px(8 + 20 + 2 + 8) + th;
-            Row box = bodyRow(h / px(1));
-            const ImVec2 p(box.left(), box.top()), q(box.left() + width - px(32), box.top() + h);
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddRectFilled(p, q, col::bg, px(8));
-            dl->AddRect(p, q, editCfg_.loadPluginsSerially != now.loadPluginsSerially ? col::midi : col::line, px(8));
-            ImGui::SetCursorScreenPos(ImVec2(p.x + px(12), p.y + px(8)));
-            toggleSwitch("##serially", editCfg_.loadPluginsSerially);
-            drawText(ImVec2(p.x + px(12 + 34 + 10), p.y + px(11.5f)), fonts.sans, 13, col::text, "Load plugins one at a time");
-            dl->AddText(fonts.sans, px(12), ImVec2(p.x + px(12 + 34 + 10), p.y + px(30)), col::text3, why, nullptr, wrap);
-            box.end(12);
-        }
+            dl->AddRect(p, q, on != applied ? col::midi : col::line, px(8));
+            ImGui::SetCursorScreenPos(ImVec2(p.x + px(padX), p.y + px(padY)));
+            toggleSwitch(id, on);
+            drawText(ImVec2(p.x + px(textX), p.y + px(padY + (len::switchHeight - 13) * 0.5f)), fonts.sans, 13, col::text, name);
+            dl->AddText(fonts.sans, px(12), ImVec2(p.x + px(textX), p.y + px(padY + len::switchHeight + lines)), col::text3, why,
+                        nullptr, wrap);
+            box.end(below);
+        };
+        option("##inprocess", editCfg_.pluginsInProcess, now.pluginsInProcess, "Run plugins inside Brack",
+               "Off: each plugin runs in a process of its own, so one that crashes or hangs stops only itself "
+               "and can be reloaded. Plugins for the other architecture always run on their own.",
+               rowGap);
+        option("##serially", editCfg_.loadPluginsSerially, now.loadPluginsSerially, "Load plugins one at a time",
+               "On: a session's plugins load, and start, one after another. Slower to open, for plugins "
+               "that fail when two of them start together.",
+               12);
         endCard();
-        spaceBelow(12);
+        spaceBelow(cardGap);
 
         if (const int n = differences(editCfg_, now)) {
             beginCard("apply", width, col::pendingBg, col::warnBorder, ImVec2(0, 0), 12);
             Row row(50, width);
-            row.gap(16);
+            row.gap(len::edge);
             row.gapRight(12);
             const ImVec2 d = row.next(px(8), px(8));
             ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(d.x + px(4), d.y + px(4)), px(4), col::midi);
@@ -1555,19 +1562,19 @@ private:
             const ImVec2 t = row.next(px(320), px(34));
             drawText(t, fonts.sans, 13, col::warn, what);
             drawText(ImVec2(t.x, t.y + px(19)), fonts.sans, 12, col::pendingNote, "Applying restarts audio and reloads every plugin.");
-            row.placeRight(buttonWidth("Apply", look::amber, 30), px(30));
-            if (button("Apply", look::amber, 30)) {
+            row.placeRight(buttonWidth("Apply", look::amber, len::button), px(len::button));
+            if (button("Apply", look::amber, len::button)) {
                 runAsync("Applying audio settings", [this, cfg = editCfg_] {
                     std::string err;
                     if (!engine_.setConfig(cfg, err)) error(err);
                 });
             }
             row.gapRight(8);
-            row.placeRight(buttonWidth("Revert", look::amberOutline, 30), px(30));
-            if (button("Revert", look::amberOutline, 30)) editCfg_ = now;
+            row.placeRight(buttonWidth("Revert", look::amberOutline, len::button), px(len::button));
+            if (button("Revert", look::amberOutline, len::button)) editCfg_ = now;
             row.end();
             endCard();
-            spaceBelow(12);
+            spaceBelow(cardGap);
         }
 
         beginCard("folders", width, col::card, col::border, ImVec2(0, 0), 12);
@@ -1575,9 +1582,9 @@ private:
         {
             Row title = cardTitle("Plugin folders", width);
             const char* rescan = scanning_ ? "Scanning###rescan" : "Rescan###rescan";
-            title.placeRight(buttonWidth(rescan, look::outline, 26, Icon::Reload, 12), px(26));
+            title.placeRight(buttonWidth(rescan, look::outline, len::lineButton, Icon::Reload, 12), px(len::lineButton));
             ImGui::BeginDisabled(scanning_);
-            if (button(rescan, look::outline, 26, Icon::Reload, 12)) startScan();
+            if (button(rescan, look::outline, len::lineButton, Icon::Reload, 12)) startScan();
             ImGui::EndDisabled();
             title.end();
         }
@@ -1585,14 +1592,14 @@ private:
         for (size_t i = 0; i < dirs.size(); ++i) {
             ImGui::PushID(int(i));
             Row row(34, width);
-            const float y = row.top() + px(34) - 1;
+            const float y = row.top() + row.height() - 1;
             ImGui::GetWindowDrawList()->AddLine(ImVec2(row.left(), y), ImVec2(row.left() + width, y), col::line);
-            row.gap(16);
+            row.gap(len::edge);
             row.gapRight(8);
-            drawIcon(ImGui::GetWindowDrawList(), Icon::Folder, row.next(px(16), px(16)), px(16), col::text3);
+            drawIcon(ImGui::GetWindowDrawList(), Icon::Folder, row.next(px(len::icon), px(len::icon)), px(len::icon), col::text3);
             row.gap(10);
-            row.placeRight(px(26), px(26));
-            const bool remove = button("##remove", look::ghost, 26, Icon::Close);
+            row.placeRight(px(len::lineButton), px(len::lineButton));
+            const bool remove = button("##remove", look::ghost, len::lineButton, Icon::Close);
             ImGui::SetItemTooltip("Remove");
             row.gapRight(8);
             const float tw = std::max(0.0f, row.remaining());
@@ -1611,15 +1618,15 @@ private:
         }
         {
             ImGui::SetCursorScreenPos(ImVec2(x0, ImGui::GetCursorScreenPos().y + px(8)));
-            Row row(28, width);
-            row.gap(16);
+            Row row(len::control, width);
+            row.gap(len::edge);
             row.gapRight(8);
-            row.placeRight(buttonWidth("Add", look::filled, 28, Icon::Plus), px(28));
+            row.placeRight(buttonWidth("Add", look::filled, len::control, Icon::Plus), px(len::control));
             std::string dir = newDir_;
             dir.erase(0, dir.find_first_not_of(" \t"));
             dir.erase(dir.find_last_not_of(" \t") + 1);
             ImGui::BeginDisabled(dir.empty());
-            const bool addDir = button("Add", look::filled, 28, Icon::Plus);
+            const bool addDir = button("Add", look::filled, len::control, Icon::Plus);
             ImGui::EndDisabled();
             row.gapRight(8);
             const float iw = row.remaining();
@@ -1635,7 +1642,7 @@ private:
         }
         {
             Row row(18, width);
-            row.gap(16);
+            row.gap(len::edge);
             note(row, "Searched as well as the standard CLAP, VST3 and VST2 locations, CLAP_PATH, VST3_PATH and VST_PATH.");
             row.end(10);
         }
@@ -1668,7 +1675,7 @@ private:
             openAdd_ = false;
         }
         const ImGuiViewport* vp = ImGui::GetMainViewport();
-        const float w = std::min(px(680), vp->WorkSize.x - px(32));
+        const float w = std::min(px(680), vp->WorkSize.x - 2 * px(len::edge));
         // The list, and kChrome above and below it.
         constexpr float kChrome = 168;
         const float listH = std::clamp(vp->WorkSize.y - px(96 + 48 + kChrome), px(120), px(420));
@@ -1695,20 +1702,20 @@ private:
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 wp = ImGui::GetWindowPos();
         bool close = ImGui::IsKeyPressed(ImGuiKey_Escape);
-        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(16), wp.y + px(12)));
-        Row head(28, w - px(28));
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(len::edge), wp.y + px(12)));
+        Row head(28, w - px(len::edge + 12));
         drawText(head.next(textWidth(fonts.bold, 16, "Add instrument"), px(16)), fonts.bold, 16, col::text, "Add instrument");
-        head.placeRight(px(26), px(26));
-        if (button("##close", look::ghost, 26, Icon::Close)) close = true;
+        head.placeRight(px(len::lineButton), px(len::lineButton));
+        if (button("##close", look::ghost, len::lineButton, Icon::Close)) close = true;
         head.end(10);
 
-        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(16), ImGui::GetCursorScreenPos().y));
-        Row search(34, w - px(32));
-        const ImVec2 s0(search.left(), search.top()), s1(search.left() + w - px(32), search.top() + px(34));
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(len::edge), ImGui::GetCursorScreenPos().y));
+        Row search(34, w - 2 * px(len::edge));
+        const ImVec2 s0(search.left(), search.top()), s1(search.left() + w - 2 * px(len::edge), search.top() + search.height());
         dl->AddRectFilled(s0, s1, col::bg, px(8));
         dl->AddRect(s0, s1, col::text, px(8));
         search.gap(12);
-        drawIcon(dl, Icon::Search, search.next(px(16), px(16)), px(16), col::text2);
+        drawIcon(dl, Icon::Search, search.next(px(len::icon), px(len::icon)), px(len::icon), col::text2);
         search.gap(10);
         search.gapRight(12);
         ImGui::PushFont(nullptr, 14);
@@ -1726,18 +1733,19 @@ private:
 
         static const char* const formats[] = {"All", "CLAP", "VST3", "VST2"};
         static const PluginFormat formatOf[] = {PluginFormat::Clap, PluginFormat::Clap, PluginFormat::Vst3, PluginFormat::Vst2};
-        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(16), ImGui::GetCursorScreenPos().y));
-        Row pills(24, w - px(32));
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(len::edge), ImGui::GetCursorScreenPos().y));
+        constexpr float pillHeight = 24, pillPad = 12;  // pillPad: each side of the label
+        Row pills(pillHeight, w - 2 * px(len::edge));
         for (int i = 0; i < 4; ++i) {
-            const float pw = px(24) + textWidth(fonts.sans, 12, formats[i]);
-            const ImVec2 p = pills.next(pw, px(24));
+            const float pw = px(2 * pillPad) + textWidth(fonts.sans, 12, formats[i]);
+            const ImVec2 p = pills.next(pw, px(pillHeight));
             ImGui::SetCursorScreenPos(p);
-            if (ImGui::InvisibleButton(formats[i], ImVec2(pw, px(24)))) addFormat_ = i;
+            if (ImGui::InvisibleButton(formats[i], ImVec2(pw, px(pillHeight)))) addFormat_ = i;
             const bool on = addFormat_ == i;
-            const ImVec2 q(p.x + pw, p.y + px(24));
-            if (on) dl->AddRectFilled(p, q, col::text, px(12));
-            else dl->AddRect(p, q, ImGui::IsItemHovered() ? col::borderTag : col::borderStrong, px(12));
-            drawText(ImVec2(p.x + px(12), p.y + px(6)), fonts.sans, 12, on ? col::onLight : col::text2, formats[i]);
+            const ImVec2 q(p.x + pw, p.y + px(pillHeight));
+            if (on) dl->AddRectFilled(p, q, col::text, px(pillHeight * 0.5f));
+            else dl->AddRect(p, q, ImGui::IsItemHovered() ? col::borderTag : col::borderStrong, px(pillHeight * 0.5f));
+            drawText(ImVec2(p.x + px(pillPad), p.y + px((pillHeight - 12) * 0.5f)), fonts.sans, 12, on ? col::onLight : col::text2, formats[i]);
             pills.gap(6);
         }
         pills.end(8);
@@ -1766,10 +1774,12 @@ private:
         ImGui::PopStyleVar();
         ImDrawList* ldl = ImGui::GetWindowDrawList();
         const float rw = ImGui::GetContentRegionAvail().x;
+        // An entry's lines: its name, its vendor, and its path while it is picked.
+        constexpr float padX = 12, padY = 6, nameH = 19, vendorH = 17, pathH = 16;
         for (size_t i = 0; i < shown.size(); ++i) {
             const PluginDescription& d = *shown[i];
             const bool on = &d == picked;
-            const float rh = px(6 + 19 + 17 + 6) + (on ? px(16) : 0);
+            const float rh = px(padY + nameH + vendorH + padY) + (on ? px(pathH) : 0);
             const ImVec2 p = ImGui::GetCursorScreenPos(), q(p.x + rw, p.y + rh);
             ImGui::PushID(int(i));
             if (ImGui::InvisibleButton("##plugin", ImVec2(rw, rh))) addPick_ = keyOf(d);
@@ -1784,7 +1794,7 @@ private:
             } else if (ImGui::IsItemHovered()) {
                 ldl->AddRectFilled(p, q, col::raised, px(8));
             }
-            float right = q.x - px(12);
+            float right = q.x - px(padX);
             auto rightBadge = [&](const std::string& s, ImU32 bg, ImU32 border) {
                 const ImVec2 sz = badgeSize(s, fonts.mono, 10, 5);
                 right -= sz.x;
@@ -1794,10 +1804,12 @@ private:
             rightBadge(pluginFormatLabel(d.format), col::control, 0);
             if (!d.architecture.empty()) rightBadge(d.architecture, 0, col::borderTag);
             ImGui::PushClipRect(p, ImVec2(right, q.y), true);
-            drawText(ImVec2(p.x + px(12), p.y + px(6)), fonts.sans, 14, col::text, d.name);
+            drawText(ImVec2(p.x + px(padX), p.y + px(padY)), fonts.sans, 14, col::text, d.name);
             ImGui::PopClipRect();
-            drawText(ImVec2(p.x + px(12), p.y + px(25)), fonts.sans, 12, col::text3, d.vendor);
-            if (on) drawText(ImVec2(p.x + px(12), p.y + px(42)), fonts.mono, 11, col::text3, shortenPath(d.path, fonts.mono, 11, q.x - p.x - px(24)));
+            drawText(ImVec2(p.x + px(padX), p.y + px(padY + nameH)), fonts.sans, 12, col::text3, d.vendor);
+            if (on)
+                drawText(ImVec2(p.x + px(padX), p.y + px(padY + nameH + vendorH)), fonts.mono, 11, col::text3,
+                         shortenPath(d.path, fonts.mono, 11, q.x - p.x - px(2 * padX)));
         }
         if (shown.empty()) {
             const char* empty = scanned_.empty() && scanning_ ? "Scanning for instruments..."
@@ -1812,30 +1824,30 @@ private:
         dl->AddRectFilled(ImVec2(wp.x + 1, footTop), ImVec2(wp.x + w - 1, wp.y + ImGui::GetWindowHeight() - 1), col::transport, px(13),
                           ImDrawFlags_RoundCornersBottom);
         dl->AddLine(ImVec2(wp.x, footTop), ImVec2(wp.x + w, footTop), col::line);
-        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(16), footTop));
-        Row foot(46, w - px(28));
-        foot.place(buttonWidth("From file...", look::outline, 30, Icon::File), px(30));
-        if (button("From file...", look::outline, 30, Icon::File)) {
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + px(len::edge), footTop));
+        Row foot(46, w - px(len::edge + 12));
+        foot.place(buttonWidth("From file...", look::outline, len::button, Icon::File), px(len::button));
+        if (button("From file...", look::outline, len::button, Icon::File)) {
             close = true;
             chooseFile();
         }
         foot.gap(8);
-        foot.place(px(30), px(30));
+        foot.place(px(len::button), px(len::button));
         ImGui::BeginDisabled(scanning_);
-        if (button("##rescan", look::outlineMuted, 30, Icon::Reload)) rescan = true;
+        if (button("##rescan", look::outlineMuted, len::button, Icon::Reload)) rescan = true;
         ImGui::EndDisabled();
         ImGui::SetItemTooltip(scanning_ ? "Scanning..." : "Rescan plugins");
         foot.gap(12);
         const std::string count = scanning_ ? std::string("Scanning...")
                                             : std::to_string(shown.size()) + " of " + std::to_string(scanned_.size()) + " instruments";
         drawText(foot.next(textWidth(fonts.sans, 12, count), px(12)), fonts.sans, 12, col::text3, count);
-        foot.placeRight(buttonWidth("Add", look::primary, 30), px(30));
+        foot.placeRight(buttonWidth("Add", look::primary, len::button), px(len::button));
         ImGui::BeginDisabled(!picked);
-        if (button("Add", look::primary, 30)) add = picked;
+        if (button("Add", look::primary, len::button)) add = picked;
         ImGui::EndDisabled();
         foot.gapRight(8);
-        foot.placeRight(buttonWidth("Cancel", look::ghost, 30), px(30));
-        if (button("Cancel", look::ghost, 30)) close = true;
+        foot.placeRight(buttonWidth("Cancel", look::ghost, len::button), px(len::button));
+        if (button("Cancel", look::ghost, len::button)) close = true;
         foot.end();
 
         if (add) {
@@ -1855,9 +1867,9 @@ private:
         const bool copied = ImGui::GetTime() - copiedAt_ < 1.5;
         const char* copy = copied ? "Copied###copy" : "Copy all###copy";
         const Icon icon = copied ? Icon::Check : Icon::Copy;
-        const ImVec2 bp = title.nextRight(buttonWidth(copy, look::outline, 30, icon), title.height());
-        ImGui::SetCursorScreenPos(ImVec2(bp.x, bp.y + title.height() - px(30)));
-        if (button(copy, look::outline, 30, icon)) {
+        const ImVec2 bp = title.nextRight(buttonWidth(copy, look::outline, len::button, icon), title.height());
+        ImGui::SetCursorScreenPos(ImVec2(bp.x, bp.y + title.height() - px(len::button)));
+        if (button(copy, look::outline, len::button, icon)) {
             std::string all;
             {
                 std::lock_guard lock(logMutex_);

@@ -134,6 +134,7 @@ static inline void brack_config_init(brack_config* cfg) {
     cfg->block_size = 256;
     cfg->resampler_quality = BRACK_SRC_HIGH;
 }
+/* A running engine restarts with it. MIDI still waiting is kept, and the render position runs on. */
 BRACK_API int BRACK_CALL brack_set_config(brack_engine* e, const brack_config* cfg);
 /* The configuration last set (not what the device ended up with: see brack_get_status).
  * cfg->struct_size must be set. audio_device points to storage of the calling thread, valid

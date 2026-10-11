@@ -167,6 +167,7 @@ The latency does not follow the order of quality because r8brain applies the fil
 - If the output is "the system default", Brack switches to the new default device within about 1 second when the OS's default changes. The same happens when a disconnection moves the default to another device. On Linux with PipeWire, the sound server switches at once, so Brack does not reopen the device.
 - If the device is chosen by name, Brack waits for that device to come back, and reopens it then.
 - Switching does not stop the plugins. If the new device has a different sample rate, the plugins keep running at their current rate, and Brack's SRC converts to the new rate.
+- Changing the settings (the output device, the buffer size, and others) stops the plugins and starts them again. MIDI received in the meantime is not discarded. The plugins get it as soon as they start.
 
 On Windows, Brack puts its audio threads in MMCSS's "Pro Audio" task. On macOS it runs them as time-constraint (real-time) threads. Linux is as described in "[Real-time priority (Linux)](#real-time-priority-linux)" below.
 

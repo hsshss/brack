@@ -55,6 +55,8 @@ public sealed unsafe class BrackEngine : IDisposable
 
     // ---- configuration and transport ----
 
+    /// <summary>A running engine restarts with it. MIDI still waiting is kept, and <see cref="RenderPosition"/>
+    /// runs on.</summary>
     public void SetConfig(BrackConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);

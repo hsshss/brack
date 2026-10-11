@@ -157,6 +157,36 @@ int run(int argc, char** argv) {
     CHECK(containsInOrder(lines, {"note-on port=0: ch=0 key=60 vel=0.7874", "note-off port=0: ch=0 key=60",
                                   "note-off port=0: ch=1 key=64"}));
 
+    // A new configuration restarts the engine. MIDI still waiting, not yet taken or timed
+    // ahead, is delivered after it, and render positions run on.
+    {
+        Engine e;
+        std::string err;
+        EngineConfig cfg;
+        cfg.blockSize = 128;
+        CHECK(e.setConfig(cfg, err));
+        CHECK(e.addPlugin({"a", synth, "brack.test.synth", "", std::nullopt}, true, err) == "a");
+        CHECK(e.addMidiSource({"keys", MidiSourceKind::Api, ""}, err) == "keys");
+        CHECK(e.addMidiRoute({"keys", "a", 0}, err));
+        CHECK(e.startManual(48000, 2, 256, err));
+        const uint8_t on[] = {0x92, 70, 0x64}, off[] = {0x82, 70, 0}, on2[] = {0x92, 72, 0x64}, off2[] = {0x82, 72, 0};
+        CHECK(e.sendMidiToSource("keys", on, 3) == MidiSend::Sent);
+        renderPeak(e, 2, 256, 1024);
+        const uint64_t pos = e.renderPosition();
+        CHECK(e.sendMidiToSource("keys", on2, 3, pos + 512) == MidiSend::Sent);
+        CHECK(e.sendMidiToSource("keys", off2, 3, pos + 1024) == MidiSend::Sent);
+        renderPeak(e, 2, 256, 256);
+        CHECK(e.sendMidiToSource("keys", off, 3) == MidiSend::Sent);
+        cfg.blockSize = 64;
+        CHECK(e.setConfig(cfg, err));
+        CHECK(e.renderPosition() == pos + 256);
+        renderPeak(e, 2, 256, 2048);
+        e.stop();
+    }
+    lines = readLines(logPath);
+    CHECK(containsInOrder(lines, {"midi port=0: 92 46 64", "midi port=0: 82 46 00", "midi port=0: 92 48 64",
+                                  "midi port=0: 82 48 00"}));
+
     // Session round trip.
     {
         Engine e;

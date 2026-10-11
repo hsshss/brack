@@ -221,8 +221,8 @@ public:
     MidiSend sendMidiToPluginAtTime(std::string_view pluginId, uint16_t notePort, const uint8_t* data, uint32_t size,
                                     int64_t timeNs);
     MidiSend sendMidiToSourceAtTime(std::string_view sourceId, const uint8_t* data, uint32_t size, int64_t timeNs);
-    // Any thread. Output frames rendered since the engine started (manual or device mode): the
-    // clock MIDI times refer to. Without sample rate conversion, a message timed t lands at
+    // Any thread. Output frames rendered since the engine started (manual or device mode; a
+    // restart by setConfig runs on): the clock MIDI times refer to. Without sample rate conversion, a message timed t lands at
     // frame t exactly; with it, the conversion's latency delays everything alike, and a message
     // sent less than a plugin block ahead may land up to a block late.
     uint64_t renderPosition() const { return renderPos_.load(std::memory_order_acquire); }
@@ -276,8 +276,14 @@ private:
     void markChanged() { changeSeq_.fetch_add(1, std::memory_order_relaxed); }
 
     // host thread helpers
+    // Continue: a restart for a new configuration keeps the MIDI still waiting, and render
+    // positions run on, so a note-off sent meanwhile is not lost.
+    enum class Timeline { Fresh, Continue };
+    bool runDevice(Timeline t, std::string& error);
+    bool runManual(Timeline t, uint32_t sampleRate, uint32_t channels, uint32_t maxFrames, std::string& error);
     void stopRunning();
-    bool startRunning(EngineMode mode, uint32_t outRate, uint32_t channels, uint32_t maxOutFrames, std::string& error);
+    bool startRunning(Timeline t, EngineMode mode, uint32_t outRate, uint32_t channels, uint32_t maxOutFrames,
+                      std::string& error);
     bool activateSlot(PluginSlot& s, std::string& error);
     // Every loaded plugin: those in plugin hosts at once, each host answering on its own; those in
     // this process one after another on this thread, as their formats require.
@@ -349,6 +355,7 @@ private:
     // published to the audio thread
     std::atomic<RtGraph*> graph_{nullptr};
     std::atomic<bool> rtReady_{false};   // real-time buffers below are valid
+    std::atomic<bool> holdMidi_{false};  // stopping: MIDI stays queued, not given to plugins that drop it
 
     // fallback clock (device mode)
     std::thread clock_;

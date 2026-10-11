@@ -95,14 +95,16 @@ bool Engine::setConfig(const EngineConfig& cfg, std::string& error) {
         if (hostingChanged)
             for (auto& p : plugins_)
                 if (std::string err; !reloadSlot(*p, err)) logError(p->cfg.id + ": " + err);
-        if (prev == EngineMode::Device) ok = startDevice(error);
-        else if (prev == EngineMode::Manual) ok = startManual(prevRate, prevCh, prevFrames, error);
+        if (prev == EngineMode::Device) ok = runDevice(Timeline::Continue, error);
+        else if (prev == EngineMode::Manual) ok = runManual(Timeline::Continue, prevRate, prevCh, prevFrames, error);
     });
     markChanged();  // the configuration changed even if restarting failed
     return ok;
 }
 
-bool Engine::startDevice(std::string& error) {
+bool Engine::startDevice(std::string& error) { return runDevice(Timeline::Fresh, error); }
+
+bool Engine::runDevice(Timeline t, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
         stopRunning();
@@ -110,7 +112,7 @@ bool Engine::startDevice(std::string& error) {
                           [this](float* const* out, uint32_t ch, uint32_t n) { deviceRender(out, ch, n); }, error))
             return;
         uint32_t period = std::max<uint32_t>(device_.periodFrames(), config_.audio.bufferFrames);
-        if (!startRunning(EngineMode::Device, device_.sampleRate(), device_.channels(), period, error)) {
+        if (!startRunning(t, EngineMode::Device, device_.sampleRate(), device_.channels(), period, error)) {
             device_.close();
             return;
         }
@@ -128,6 +130,10 @@ bool Engine::startDevice(std::string& error) {
 }
 
 bool Engine::startManual(uint32_t sampleRate, uint32_t channels, uint32_t maxFrames, std::string& error) {
+    return runManual(Timeline::Fresh, sampleRate, channels, maxFrames, error);
+}
+
+bool Engine::runManual(Timeline t, uint32_t sampleRate, uint32_t channels, uint32_t maxFrames, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
         stopRunning();
@@ -135,7 +141,7 @@ bool Engine::startManual(uint32_t sampleRate, uint32_t channels, uint32_t maxFra
             error = "invalid manual render format";
             return;
         }
-        ok = startRunning(EngineMode::Manual, sampleRate, channels, std::max<uint32_t>(maxFrames, 1), error);
+        ok = startRunning(t, EngineMode::Manual, sampleRate, channels, std::max<uint32_t>(maxFrames, 1), error);
     });
     return ok;
 }
@@ -144,26 +150,29 @@ void Engine::stop() {
     host_->invoke([this] { stopRunning(); });
 }
 
-bool Engine::startRunning(EngineMode mode, uint32_t outRate, uint32_t channels, uint32_t maxOutFrames,
+bool Engine::startRunning(Timeline t, EngineMode mode, uint32_t outRate, uint32_t channels, uint32_t maxOutFrames,
                           std::string& error) {
     procRate_ = config_.processSampleRate ? config_.processSampleRate : outRate;
     blockSize_ = std::clamp<uint32_t>(config_.blockSize, 16, 8192);
-    steadyTime_ = 0;
-    renderPos_.store(0, std::memory_order_release);
-    frameMap_ = {};
-    arrival_.forgetOrder();
+    if (t == Timeline::Fresh) {
+        steadyTime_ = 0;
+        renderPos_.store(0, std::memory_order_release);
+        frameMap_ = {};
+        arrival_.forgetOrder();
+        for (auto& s : sources_) {
+            s->queue->clear();
+            s->pending->clear();
+        }
+        for (auto& p : plugins_) {
+            p->direct->clear();
+            p->pending->clear();
+        }
+    }
     if (!configureOutput(outRate, channels, maxOutFrames, error)) return false;
-    for (auto& s : sources_) {
-        s->queue->clear();
-        s->pending->clear();
-    }
-    for (auto& p : plugins_) {
-        p->direct->clear();
-        p->pending->clear();
-    }
     activateSlots();
     mode_ = mode;
     publishGraph();
+    holdMidi_.store(false);
     rtReady_.store(true);
     return true;
 }
@@ -270,7 +279,11 @@ void Engine::switchOutputDevice() {
 
 void Engine::stopRunning() {
     if (mode_ == EngineMode::Stopped) return;
+    holdMidi_.store(true);
     if (mode_ == EngineMode::Device) {
+        // A render in flight may have taken messages already: it hands them over before the stop.
+        uint64_t s = audioSeq_.load();
+        if (s & 1) waitFor([&] { return audioSeq_.load() != s; }, std::chrono::milliseconds(2000));
         // clap: stop_processing belongs on the audio thread; the device callback (or,
         // while the device is away, the fallback clock) is rendering, so ask it and
         // wait for the acknowledgement.
@@ -537,7 +550,9 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
     };
 
     for (auto& n : g.nodes) n.events->clear();
+    const bool takeMidi = !holdMidi_.load();
     for (auto& src : g.sources) {
+        if (!takeMidi) break;
         auto deliver = [&](const uint8_t* d, uint32_t size, uint16_t, uint64_t time) {
             for (auto& t : src.targets) {
                 auto& node = g.nodes[t.node];
@@ -552,6 +567,7 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
         });
     }
     for (auto& n : g.nodes) {
+        if (!takeMidi) break;
         auto deliver = [&](const uint8_t* d, uint32_t size, uint16_t port, uint64_t time) {
             n.plugin->appendMidi(*n.events, port, d, size, offset(time));
         };

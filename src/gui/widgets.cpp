@@ -219,7 +219,7 @@ bool button(const char* label, const ButtonLook& look, float height, Icon icon, 
 }
 
 bool dbFader(const char* id, float& db, float minDb, float maxDb, float width, float thumb, ImU32 fill) {
-    const float th = px(thumb), h = th + px(12);
+    const float th = px(thumb), h = th + px(8);
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(id, ImVec2(width, h));
     // The thumb's centre travels between these, so the thumb stays within `width`.
@@ -260,7 +260,7 @@ float segmentedWidth(std::span<const char* const> labels) {
 bool segmented(const char* id, int& selected, std::span<const char* const> labels, ImU32 onBg, ImU32 onText) {
     ImGui::PushID(id);
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    const float w = segmentedWidth(labels), h = px(34), inner = px(28);
+    const float w = segmentedWidth(labels), h = px(28), inner = px(22);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), tint(col::bg), px(7));
     dl->AddRect(p, ImVec2(p.x + w, p.y + h), tint(col::border), px(7));
@@ -290,13 +290,13 @@ bool segmented(const char* id, int& selected, std::span<const char* const> label
 }
 
 bool toggleSwitch(const char* id, bool& on) {
-    const ImVec2 p = ImGui::GetCursorScreenPos(), q(p.x + px(40), p.y + px(24));
+    const ImVec2 p = ImGui::GetCursorScreenPos(), q(p.x + px(34), p.y + px(20));
     const bool clicked = ImGui::InvisibleButton(id, ImVec2(q.x - p.x, q.y - p.y));
     if (clicked) on = !on;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p, q, tint(on ? col::text : col::control), px(12));
-    dl->AddRect(p, q, tint(on ? col::text : col::borderTag), px(12));
-    dl->AddCircleFilled(ImVec2(p.x + px(on ? 27.0f : 11.0f), p.y + px(12)), px(8), tint(on ? col::onLight : col::text2));
+    dl->AddRectFilled(p, q, tint(on ? col::text : col::control), px(10));
+    dl->AddRect(p, q, tint(on ? col::text : col::borderTag), px(10));
+    dl->AddCircleFilled(ImVec2(p.x + px(on ? 24.0f : 10.0f), p.y + px(10)), px(7), tint(on ? col::onLight : col::text2));
     return clicked;
 }
 
@@ -312,14 +312,27 @@ void badge(ImVec2 pos, std::string_view s, ImFont* font, float size, ImU32 bg, I
     drawText(ImVec2(pos.x + px(padX), pos.y + (sz.y - px(size)) * 0.5f), font, size, textCol, s);
 }
 
+bool beginPopupMenu(const char* id) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(8), px(8)));
+    const bool open = ImGui::BeginPopup(id);
+    ImGui::PopStyleVar();
+    if (open) ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), px(14)));
+    return open;
+}
+
+void endPopupMenu() {
+    ImGui::PopStyleVar();
+    ImGui::EndPopup();
+}
+
 void sectionHeader(const char* label, ImU32 dot, const char* hint) {
-    Row row(24);
+    Row row(20);
     const ImVec2 d = row.next(px(8), px(8));
     ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(d.x + px(4), d.y + px(4)), px(4), tint(dot));
     row.gap(8);
     drawText(row.next(textWidth(fonts.bold, 12, label), px(12)), fonts.bold, 12, col::text2, label);
     if (hint) drawText(row.nextRight(textWidth(fonts.sans, 12, hint), px(12)), fonts.sans, 12, col::text3, hint);
-    row.end(10);
+    row.end(6);
 }
 
 void beginCard(const char* id, float width, ImU32 bg, ImU32 border, ImVec2 padding, float rounding) {

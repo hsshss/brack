@@ -85,6 +85,11 @@ bool toggleSwitch(const char* id, bool& on);
 void badge(ImVec2 pos, std::string_view s, ImFont* font, float size, ImU32 bg, ImU32 border, ImU32 textCol, float padX);
 ImVec2 badgeSize(std::string_view s, ImFont* font, float size, float padX);
 
+// A popup menu opened with ImGui::OpenPopup(id), its items further apart than ImGui's. When it
+// returns true, add the items, then call endPopupMenu().
+bool beginPopupMenu(const char* id);
+void endPopupMenu();
+
 // A list section's heading: a coloured dot, the label, and a hint at the right.
 void sectionHeader(const char* label, ImU32 dot, const char* hint = nullptr);
 

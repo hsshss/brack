@@ -91,7 +91,8 @@ private:
             if (chain_) return {{"ok", false}, {"error", "this plugin host already has a chain"}};
             std::unique_ptr<PluginInstance> instrument;
             if (m.contains("path")) {
-                instrument = createPluginInstance(host_, *this, m.value("path", ""), m.value("pluginId", ""), error);
+                instrument =
+                    createPluginInstance(host_, *this, m.value("path", ""), m.value("pluginId", ""), true, error);
                 if (!instrument || !instrument->init(error)) {
                     if (instrument && instrument->crashed()) link_.endAfterCrash(error);
                     return {{"ok", false}, {"error", error}};

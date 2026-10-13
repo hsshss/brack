@@ -23,7 +23,7 @@ LocalChain::~LocalChain() {
 HostedPlugin* LocalChain::prepareEffect(const std::string& pathUtf8, const std::string& pluginId,
                                         std::string& error) {
     prepared_.reset();
-    auto effect = createPluginInstance(host_, listener_, pathUtf8, pluginId, error);
+    auto effect = createPluginInstance(host_, listener_, pathUtf8, pluginId, false, error);
     if (!effect) return nullptr;
     bool ok = effect->init(error);
     if (ok && (effect->audioInputs().empty() || effect->audioOutputs().empty())) {

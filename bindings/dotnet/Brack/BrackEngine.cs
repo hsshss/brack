@@ -177,7 +177,10 @@ public sealed unsafe class BrackEngine : IDisposable
 
     /// <summary>Adds a plugin and returns its id.</summary>
     /// <param name="path">A .clap file, a .vst3 bundle or file, or a VST2 .dll.</param>
-    /// <param name="pluginId">Which plugin in the file (CLAP id, VST3 class id, VST2 unique id); null for the first.</param>
+    /// <param name="pluginId">
+    /// Which plugin in the file (CLAP id, VST3 class id, VST2 unique id); null for the first, of a CLAP or VST3 file
+    /// the first instrument.
+    /// </param>
     /// <param name="id">The instance id; null to make one from the plugin's name.</param>
     /// <param name="routeAudio">Whether to route its main output to outputs 1 and 2.</param>
     public string AddPlugin(string path, string? pluginId = null, string? id = null, bool routeAudio = true)
@@ -243,7 +246,7 @@ public sealed unsafe class BrackEngine : IDisposable
     /// <param name="ownerId">The instrument; null for the master.</param>
     /// <param name="index">Where among the chain's effects (clamped).</param>
     /// <param name="path">A .clap file, a .vst3 bundle or file, or a VST2 .dll.</param>
-    /// <param name="pluginId">Which plugin in the file; null for the first.</param>
+    /// <param name="pluginId">Which plugin in the file; null for the first, of a CLAP or VST3 file the first effect.</param>
     /// <param name="id">The effect's id; null to make one from the plugin's name.</param>
     public string AddEffect(string? ownerId, int index, string path, string? pluginId = null, string? id = null)
     {

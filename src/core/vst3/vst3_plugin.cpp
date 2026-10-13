@@ -1288,17 +1288,14 @@ bool Vst3Editor::open(const std::string& title, std::string& error) {
 
 std::unique_ptr<PluginInstance> createVst3Instance(HostThread& host, PluginHostListener& listener,
                                                    const std::string& pathUtf8, const std::string& pluginId,
-                                                   std::string& error) {
+                                                   bool instrument, std::string& error) {
     auto module = loadModule(pathUtf8, error);
     if (!module) return nullptr;
     std::vector<PluginDescription> descs;
     if (!module->describe(descs, error)) return nullptr;
-    auto it = std::find_if(descs.begin(), descs.end(), [&](auto& d) { return pluginId.empty() || d.id == pluginId; });
-    if (it == descs.end()) {
-        error = pluginId.empty() ? "no audio processors in the file" : "plugin " + pluginId + " not found";
-        return nullptr;
-    }
-    PluginDescription desc = *it;
+    const PluginDescription* selected = selectPlugin(descs, pluginId, instrument, error);
+    if (!selected) return nullptr;
+    PluginDescription desc = *selected;
     std::string name = desc.name;
     return std::make_unique<Vst3Instance>(host, listener, std::move(module), std::move(desc), name);
 }

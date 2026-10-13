@@ -147,6 +147,11 @@ void chains(const std::string& synth, const std::string& gain, const std::string
         CHECK(e.addEffect("s", 0, {"x", synth, "brack.test.synth", "", std::nullopt}, err).empty());
         std::printf("  an instrument as an effect: %s\n", err.c_str());
         CHECK(err.find("not an effect") != std::string::npos);
+        // A file without a plugin id gives the first of the kind asked for.
+        CHECK(e.addEffect("s", 0, {"x", synth, "", "", std::nullopt}, err).empty());
+        CHECK(err.find("no effect in the file") != std::string::npos);
+        CHECK(e.addPlugin({"x", gain, "", "", std::nullopt}, true, err).empty());
+        CHECK(err.find("no instrument in the file") != std::string::npos);
         CHECK(e.addEffect("nope", 0, {"", gain, "", "", std::nullopt}, err).empty());
         CHECK(e.addEffect("s", 0, {"s", gain, "", "", std::nullopt}, err).empty());  // the id is taken
         CHECK(e.addMidiSource({"keys", MidiSourceKind::Api, ""}, err) == "keys");

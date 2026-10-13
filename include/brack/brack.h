@@ -167,7 +167,8 @@ BRACK_API uint64_t BRACK_CALL brack_get_render_position(brack_engine* e);
  * id_out_size: at least BRACK_ID_MAX, or strlen(id) + 1 when `id` is given; a smaller one fails
  * with BRACK_ERR_BUFFER_TOO_SMALL and adds nothing. Likewise for brack_add_midi_source.
  * plugin_id selects the plugin inside the file (CLAP id, VST3 class id as 32 hex digits, VST2
- * unique id as its four characters or 0xXXXXXXXX); NULL/"" selects the first. */
+ * unique id as its four characters or 0xXXXXXXXX); NULL/"" selects the first, of a CLAP or VST3
+ * file the first instrument (for brack_add_effect, the first effect), and fails if there is none. */
 /* Also routes the plugin's main output to outputs 1 and 2 (see brack_add_plugin_ex). */
 BRACK_API int BRACK_CALL brack_add_plugin(brack_engine* e, const char* id, const char* plugin_path, const char* plugin_id,
                                           char* id_out, size_t id_out_size);

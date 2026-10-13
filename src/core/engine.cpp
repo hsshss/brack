@@ -795,7 +795,7 @@ std::unique_ptr<HostedChain> Engine::makeChain(PluginSlot& s, bool& stateRejecte
         if (inProcess) {
             std::unique_ptr<PluginInstance> instrument;
             if (!master) {
-                instrument = createPluginInstance(*host_, *this, s.cfg.path, s.cfg.pluginId, error);
+                instrument = createPluginInstance(*host_, *this, s.cfg.path, s.cfg.pluginId, true, error);
                 if (!instrument || !instrument->init(error)) {
                     error = s.cfg.path + ": " + error;
                     return;

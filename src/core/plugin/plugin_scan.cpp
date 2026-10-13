@@ -50,9 +50,22 @@ std::string pluginArchitecture(const std::filesystem::path& path) {
     return inspectBinary(pluginBinaryPath(format, path), bi, error) ? bi.architecture() : std::string();
 }
 
+const PluginDescription* selectPlugin(const std::vector<PluginDescription>& descs, const std::string& pluginId,
+                                      bool instrument, std::string& error) {
+    auto it = std::find_if(descs.begin(), descs.end(), [&](auto& d) {
+        return pluginId.empty() ? d.isInstrument() == instrument : d.id == pluginId;
+    });
+    if (it != descs.end()) return &*it;
+    error = !pluginId.empty() ? "plugin " + pluginId + " not found"
+            : descs.empty()   ? std::string("no plugins in the file")
+            : instrument      ? std::string("no instrument in the file")
+                              : std::string("no effect in the file");
+    return nullptr;
+}
+
 std::unique_ptr<PluginInstance> createPluginInstance(HostThread& host, PluginHostListener& listener,
                                                      const std::string& pathUtf8, const std::string& pluginId,
-                                                     std::string& error) {
+                                                     bool instrument, std::string& error) {
     PluginFormat format;
     if (!pluginFormatFromPath(pathFromUtf8(pathUtf8), format)) {
         error = "unknown plugin format (expected " + pluginExtensionsText() + ")";
@@ -64,20 +77,16 @@ std::unique_ptr<PluginInstance> createPluginInstance(HostThread& host, PluginHos
             if (!module) return nullptr;
             std::vector<PluginDescription> descs;
             if (!module->describe(descs, error)) return nullptr;
-            auto it = std::find_if(descs.begin(), descs.end(),
-                                   [&](auto& d) { return pluginId.empty() || d.id == pluginId; });
-            if (it == descs.end()) {
-                error = pluginId.empty() ? "no plugins in the file" : "plugin " + pluginId + " not found";
-                return nullptr;
-            }
-            PluginDescription desc = *it;
+            const PluginDescription* selected = selectPlugin(descs, pluginId, instrument, error);
+            if (!selected) return nullptr;
+            PluginDescription desc = *selected;
             std::string name = desc.name;
             return std::make_unique<ClapInstance>(host, listener, std::move(module), std::move(desc), name);
         }
         case PluginFormat::Vst2:
             if (!checkVst2Binary(pathFromUtf8(pathUtf8), error)) return nullptr;
             return createVst2Instance(host, listener, pathUtf8, pluginId, error);
-        case PluginFormat::Vst3: return createVst3Instance(host, listener, pathUtf8, pluginId, error);
+        case PluginFormat::Vst3: return createVst3Instance(host, listener, pathUtf8, pluginId, instrument, error);
     }
     return nullptr;
 }

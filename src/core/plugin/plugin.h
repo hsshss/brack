@@ -332,10 +332,15 @@ private:
 std::string pluginArchitecture(const std::filesystem::path& path);
 
 // Creates (but does not init) an instance of `pluginId` in the file at `path`, in this process;
-// the format follows the extension. An empty id selects the first plugin in the file.
+// the format follows the extension. An empty id selects the first plugin in the file, of the kind
+// asked for (`instrument`) where the format says (CLAP, VST3; a VST2's say is often missing).
 std::unique_ptr<PluginInstance> createPluginInstance(HostThread& host, PluginHostListener& listener,
                                                      const std::string& pathUtf8, const std::string& pluginId,
-                                                     std::string& error);
+                                                     bool instrument, std::string& error);
+
+// The description createPluginInstance() selects among a file's: null, with `error`, if none.
+const PluginDescription* selectPlugin(const std::vector<PluginDescription>& descs, const std::string& pluginId,
+                                      bool instrument, std::string& error);
 
 // Standard locations of a format on this platform, plus its environment variable
 // (CLAP_PATH, VST_PATH, VST3_PATH).

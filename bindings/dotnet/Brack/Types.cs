@@ -35,6 +35,8 @@ public enum MidiSendResult
     NotFound = -3,
     /// <summary>The plugin's or source's queue is full; the message was dropped.</summary>
     QueueFull = -5,
+    /// <summary>The plugin failed to load or crashed; the message was dropped.</summary>
+    NotLoaded = -6,
 }
 
 public enum PluginFormat

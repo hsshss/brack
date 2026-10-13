@@ -43,7 +43,7 @@ class MidiQueue;
 enum class MidiSourceKind { Hardware, Virtual, Api };
 
 // What became of a message given to Engine::sendMidiTo*.
-enum class MidiSend { Sent, Malformed, UnknownId, QueueFull };
+enum class MidiSend { Sent, Malformed, UnknownId, QueueFull, NotLoaded };
 const char* midiSourceKindName(MidiSourceKind k);
 bool parseMidiSourceKind(const std::string& s, MidiSourceKind& out);
 
@@ -456,7 +456,10 @@ private:
     // injection lookup (shared lock for senders, exclusive on host-thread changes); looked up by
     // string_view, so a sender on a real-time thread does not allocate a key
     mutable std::shared_mutex injectMutex_;
-    std::map<std::string, MidiQueue*, std::less<>> injectPlugins_, injectSources_;
+    std::map<std::string, PluginSlot*, std::less<>> injectPlugins_;
+    std::map<std::string, MidiQueue*, std::less<>> injectSources_;
+    MidiSend pushToPlugin(std::string_view id, const uint8_t* data, uint32_t size, uint16_t notePort, uint64_t time,
+                          int64_t timeNs);
 
     // published to the audio thread
     std::atomic<RtGraph*> graph_{nullptr};

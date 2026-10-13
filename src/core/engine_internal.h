@@ -36,6 +36,9 @@ struct Engine::PluginSlot {
     // Host thread: EngineEvent::PluginCrashed sent for the chain's crash; cleared once the chain is
     // gone or no longer crashed.
     bool crashReported = false;
+    // Its instrument is loaded, and neither crashed nor failed; a message to one that is not is
+    // refused (MidiSend::NotLoaded). Set on the host thread (noteTakesMidi()), read on any.
+    std::atomic<bool> takesMidi{false};
     // Host thread: how far its chain is into a change (quiesceSlot()), for the graph. Its MIDI waits
     // meanwhile: a plugin asked to stop drops its block's events.
     enum class Change {
@@ -46,6 +49,10 @@ struct Engine::PluginSlot {
     } change = Change::None;
 
     HostedPlugin* instrument() const { return chain && chain->hasInstrument() ? &chain->plugin(0) : nullptr; }
+    void noteTakesMidi() {
+        const HostedPlugin* i = instrument();
+        takesMidi.store(i && !chain->crashed() && !i->processFailed(), std::memory_order_relaxed);
+    }
     // Where effects[i] is in the chain (once it is `chain`), or would go if it were loaded.
     size_t chainIndex(size_t i) const {
         size_t at = chain && chain->hasInstrument() ? 1 : 0;

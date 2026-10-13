@@ -73,6 +73,7 @@ enum {
     BRACK_ERR_NOT_FOUND = -3,       /* the plugin, MIDI source or route named does not exist */
     BRACK_ERR_BUFFER_TOO_SMALL = -4,
     BRACK_ERR_QUEUE_FULL = -5,      /* brack_send_midi*: the queue is full, the message dropped */
+    BRACK_ERR_NOT_LOADED = -6,      /* brack_send_midi*: the plugin failed to load or crashed, the message dropped */
 };
 
 /* Size of a buffer that holds any id Brack generates, terminator included. */

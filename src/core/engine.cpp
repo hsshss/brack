@@ -428,6 +428,7 @@ void Engine::settleSlot(PluginSlot& s) {
     std::shared_ptr<HostedChain> empty;  // the master's, with no effect: no process for nothing
     if (isMaster(s) && s.chain && s.chain->size() == 0) empty = std::move(s.chain);
     s.change = PluginSlot::Change::None;
+    s.noteTakesMidi();
     if (mode_ != EngineMode::Stopped) publishGraph();  // out of the graph before it goes
 }
 
@@ -759,7 +760,7 @@ void Engine::rebuildInjectionMaps() {
     std::unique_lock lock(injectMutex_);
     injectPlugins_.clear();
     injectSources_.clear();
-    for (auto& p : plugins_) injectPlugins_[p->cfg.id] = p->direct.get();
+    for (auto& p : plugins_) injectPlugins_[p->cfg.id] = p.get();
     for (auto& s : sources_) injectSources_[s->cfg.id] = s->queue.get();
 }
 
@@ -892,6 +893,7 @@ std::string Engine::installPlugin(std::unique_ptr<PluginSlot> slot, bool stateRe
         }
     }
     const std::string id = cfg.id;
+    slot->noteTakesMidi();
     plugins_.push_back(std::move(slot));
     rebuildInjectionMaps();
     if (mode_ != EngineMode::Stopped) publishGraph();
@@ -1293,6 +1295,7 @@ void Engine::pushEvent(EngineEvent e) {
 
 void Engine::checkEvents() {
     for (PluginSlot* p : slots()) {
+        p->noteTakesMidi();
         if (!p->chain || !p->chain->crashed()) {
             p->crashReported = false;
             continue;
@@ -1602,9 +1605,20 @@ MidiSend pushMidi(std::shared_mutex& mutex, const Queues& queues, std::string_vi
 }
 }  // namespace
 
+MidiSend Engine::pushToPlugin(std::string_view id, const uint8_t* data, uint32_t size, uint16_t notePort, uint64_t time,
+                              int64_t timeNs) {
+    if (!isValidMessage(data, size)) return MidiSend::Malformed;
+    std::shared_lock lock(injectMutex_);
+    auto it = injectPlugins_.find(id);
+    if (it == injectPlugins_.end()) return MidiSend::UnknownId;
+    // Its queue would fill unheard, and the sender take it for one played too fast.
+    if (!it->second->takesMidi.load(std::memory_order_relaxed)) return MidiSend::NotLoaded;
+    return it->second->direct->push(data, size, notePort, time, timeNs) ? MidiSend::Sent : MidiSend::QueueFull;
+}
+
 MidiSend Engine::sendMidiToPlugin(std::string_view pluginId, uint16_t notePort, const uint8_t* data, uint32_t size,
                                   uint64_t time) {
-    return pushMidi(injectMutex_, injectPlugins_, pluginId, data, size, notePort, time);
+    return pushToPlugin(pluginId, data, size, notePort, time, 0);
 }
 
 MidiSend Engine::sendMidiToSource(std::string_view sourceId, const uint8_t* data, uint32_t size, uint64_t time) {
@@ -1616,7 +1630,7 @@ int64_t Engine::nowNs() { return steadyNowNs(); }
 MidiSend Engine::sendMidiToPluginAtTime(std::string_view pluginId, uint16_t notePort, const uint8_t* data,
                                         uint32_t size, int64_t timeNs) {
     if (timeNs <= 0) return MidiSend::Malformed;
-    return pushMidi(injectMutex_, injectPlugins_, pluginId, data, size, notePort, kMidiNow, timeNs);
+    return pushToPlugin(pluginId, data, size, notePort, kMidiNow, timeNs);
 }
 
 MidiSend Engine::sendMidiToSourceAtTime(std::string_view sourceId, const uint8_t* data, uint32_t size,

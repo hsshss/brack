@@ -188,8 +188,9 @@ int RunTests()
         Check(WaitFor(engine, BrackEventType.PluginCrashed, out BrackEvent crash), "crash event");
         Console.WriteLine($"crash: {crash.Id}: {crash.Message}");
         Check(crash.Id == "a" && crash.Message.Contains("crashed in process"), "crash event contents");
+        Check(engine.SendMidi("a", 0, [0x90, 0x3C, 0x64]) == MidiSendResult.NotLoaded, "a crashed plugin refuses MIDI");
         engine.ReloadPlugin("a");
-        engine.SendMidi("a", 0, [0x90, 0x3C, 0x64]);
+        Check(engine.SendMidi("a", 0, [0x90, 0x3C, 0x64]) == MidiSendResult.Sent, "reloaded, it takes MIDI");
         Check(Peak(engine, 4800) > 0.1f, "reloaded, it plays");
         Throws(BrackErrorCode.NotFound, () => engine.ReloadPlugin("nope"), "reloading an unknown plugin");
         Check(engine.GetCachedStatus().Plugins.Count == 1, "cached status");

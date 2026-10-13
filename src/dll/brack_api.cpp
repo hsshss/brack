@@ -92,6 +92,8 @@ int sendResult(brack::MidiSend result, const char* unknownId) {
         case brack::MidiSend::Malformed: return failLiteral(BRACK_ERR_INVALID_ARGUMENT, "not one complete MIDI message");
         case brack::MidiSend::UnknownId: return failLiteral(BRACK_ERR_NOT_FOUND, unknownId);
         case brack::MidiSend::QueueFull: return failLiteral(BRACK_ERR_QUEUE_FULL, "MIDI queue full, message dropped");
+        case brack::MidiSend::NotLoaded:
+            return failLiteral(BRACK_ERR_NOT_LOADED, "the plugin failed to load or crashed, message dropped");
     }
     return failLiteral(BRACK_ERR_FAILED, "message not sent");
 }

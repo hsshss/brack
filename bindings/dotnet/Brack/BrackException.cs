@@ -8,6 +8,7 @@ public enum BrackErrorCode
     NotFound = -3,
     BufferTooSmall = -4,
     QueueFull = -5,
+    NotLoaded = -6,
 }
 
 /// <summary>A call into brack.dll failed; <see cref="Exception.Message"/> is the library's own description.</summary>

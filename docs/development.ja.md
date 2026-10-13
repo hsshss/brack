@@ -22,7 +22,7 @@ src/host/                   プラグインホストプロセス（brack-host-<�
 src/dll/  src/cli/  src/gui/
 src/gui/icon/               アプリのアイコン（SVG と、そこから書き出した各 OS 用のファイル）
 bindings/dotnet/            .NET バインディング（Brack）とそのテスト
-tests/                      テスト用シンセ（CLAP / VST3 / VST2）とテスト
+tests/                      テスト用シンセとエフェクト（CLAP / VST3 / VST2）とテスト
 tools/vmidi_probe/          仮想ポートの診断ツール
 tools/midi-timing/          MIDI の時刻の計測（設計メモの 15 章）
 tools/app-icon/             アイコンの SVG から各 OS 用のファイルを書き出す
@@ -91,7 +91,7 @@ x64 版と x86 版は互いのプラグインホストを、ARM64 版は x64 と
 
 - `build\bin` に `brack.exe`（GUI）、`brack-cli.exe`、`brack.dll` と、同梱するプラグインホストができます。`cmake --install` では、`bin` にこれらが、`include` に `brack.h` が、`lib` に `brack.lib` が入ります。
 - ARM64 の PC では、x64 版と x86 版も `vcvarsarm64_amd64.bat` / `vcvarsarm64_x86.bat` で `build` と `build-x86` にビルドできます。テストは Windows のエミュレーションで動きます。
-- MSVC では、同じ名前のターゲット（同じフォルダにできる `brack.exe` と `brack.dll`、CLAP と VST3 のテスト用シンセ `brack-test-synth`）が同じ `.pdb` と `.ilk` を書こうとします。そこで、リンカーのファイルを分けたうえで（GUI の PDB は `brack-gui.pdb`、`/INCREMENTAL:NO`）、`add_dependencies` で順にリンクします。リンカーは同じ名前の古い `.ilk` を消すので、同時にリンクすると、もう一方の `.ilk` を消してしまうためです。
+- MSVC では、同じ名前のターゲット（同じフォルダにできる `brack.exe` と `brack.dll`、CLAP と VST3 のテスト用シンセ `brack-test-synth`、テスト用エフェクト `brack-test-gain`）が同じ `.pdb` と `.ilk` を書こうとします。そこで、リンカーのファイルを分けたうえで（GUI の PDB は `brack-gui.pdb`、`/INCREMENTAL:NO`）、`add_dependencies` で順にリンクします。リンカーは同じ名前の古い `.ilk` を消すので、同時にリンクすると、もう一方の `.ilk` を消してしまうためです。
 
 ### Linux
 
@@ -144,7 +144,7 @@ cmake -S . -B build-universal -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAK
 
 ## テストと道具
 
-- ctest には、エンジン、形式ごとのテスト用シンセ、クラッシュの封じ込め、プラグインホスト、DLL、.NET バインディングなどのテストが入っています（設計メモの 8 章）。
+- ctest には、エンジン、形式ごとのテスト用シンセとエフェクト、クラッシュの封じ込め、プラグインホスト、DLL、.NET バインディングなどのテストが入っています（設計メモの 8 章）。
   - .NET のテスト（`bindings/dotnet/Brack.Tests`）は、.NET SDK があれば 64 ビット版の ctest に含まれます（Windows、Linux、macOS）。
   - `test_api_parity` は、エンジンの公開メソッドと C API が対応していること、C API の関数が .NET バインディングに漏れなく入っていることを確かめます。
   - `test_isolation` は 1 ブロックあたりの時間も表示します（設計メモの 15 章）。`test_isolation --block-cost <brack-test-synth.clap> [<frames>]` で、ブロックの費用だけを測れます。プラグインを 1・2・4・8 つにして、ブロックを休みなく続ける測り方と、実際のデバイスのようにブロックごとの時刻に処理する測り方（paced）の両方で測ります。`<frames>` を省くと 64 と 256 フレームの両方です。Linux と macOS では、1 ブロックあたりの眠った回数も出します（別の CPU に移った回数は Linux だけ）。

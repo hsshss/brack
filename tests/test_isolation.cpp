@@ -4,8 +4,10 @@
 // in Brack's; host processes end with Brack, however it ends; a plugin built for the other
 // architecture runs too, when that architecture's build is there to lend its plugin host; the
 // plugin host's audio thread is real-time (on Linux, where this user may have that); a session's
-// plugins load at once; an editor's window fits it (on Windows, and X11); a VST3 plugin finds the
-// host thread's run loop through its host context (Linux). Also prints what a block costs.
+// plugins load at once; an editor's window fits it (on Windows, and X11); removing an effect
+// closes its editor alone, and a master without effects that load runs no plugin host (Windows);
+// a VST3 plugin finds the host thread's run loop through its host context (Linux). Also prints
+// what a block costs.
 //
 //   test_isolation <brack-test-synth.clap> <vst2 synth> <vst3 synth> [<other architectures' synths>...]
 //   test_isolation --block-cost <brack-test-synth.clap> [<frames>]
@@ -222,7 +224,9 @@ void soundsTheSame(const std::string& path) {
 
 // The other architecture's build of the synth runs in that architecture's plugin host, even
 // with plugins in this process otherwise, and sounds like this architecture's build of it.
-void otherArchitecture(const std::string& synth, const std::string& otherSynth) {
+// Effects run in their instrument's process: the other build's gain goes on the other build's
+// synth, and nowhere else.
+void otherArchitecture(const std::string& synth, const std::string& gain, const std::string& otherSynth) {
     std::error_code ec;
     if (otherSynth.empty() || !std::filesystem::exists(pathFromUtf8(otherSynth), ec)) {
         std::printf("other architecture: skipped, no build of the test synth for it (%s)\n", otherSynth.c_str());
@@ -258,6 +262,34 @@ void otherArchitecture(const std::string& synth, const std::string& otherSynth) 
     for (auto& d : Engine::scanPlugins({pathToUtf8(pathFromUtf8(otherSynth).parent_path())}, {}, false))
         if (d.architecture == arch && d.id == "brack.test.synth") listed = true;
     CHECK(listed);
+
+    const std::string otherGain = pathToUtf8(pathFromUtf8(otherSynth).parent_path() / pathFromUtf8(gain).filename());
+    if (!std::filesystem::exists(pathFromUtf8(otherGain), ec)) {
+        std::printf("other architecture's effects: skipped, no build of the test gain for it (%s)\n", otherGain.c_str());
+        return;
+    }
+    Engine e;
+    std::string err;
+    start(e);
+    CHECK(e.addPlugin({"theirs", otherSynth, "brack.test.synth", "", std::nullopt}, true, err) == "theirs");
+    CHECK(e.addPlugin({"ours", synth, "brack.test.synth", "", std::nullopt}, false, err) == "ours");
+    const uint8_t on[] = {0x90, 0x3C, 0x64};
+    CHECK(e.sendMidiToPlugin("theirs", 0, on, 3) == MidiSend::Sent);
+    renderPeaks(e, 2048);
+    const float dry = renderPeaks(e, 4800)[0];
+    CHECK(e.addEffect("theirs", 0, {"g", otherGain, "brack.test.gain", "", std::nullopt}, err) == "g");
+    renderPeaks(e, 2048);
+    const float wet = renderPeaks(e, 4800)[0];
+    std::printf("%s gain on the %s synth: %.3f, then %.3f\n", arch.c_str(), arch.c_str(), dry, wet);
+    CHECK(dry > 0.1f && std::fabs(wet - dry * 0.5f) < dry * 0.03f);
+    const auto snap = e.snapshot();
+    const auto* theirs = find(snap, "theirs");
+    CHECK(theirs && theirs->effects.size() == 1 && theirs->effects[0].architecture == arch);
+    CHECK(e.addEffect("ours", 0, {"", otherGain, "brack.test.gain", "", std::nullopt}, err).empty());
+    std::printf("%s gain on this build's synth: %s\n", arch.c_str(), err.c_str());
+    CHECK(has(err, "built for " + arch));
+    CHECK(e.addEffect("", 0, {"", otherGain, "brack.test.gain", "", std::nullopt}, err).empty());  // the master's
+    CHECK(has(err, "built for " + arch));
 }
 
 #ifdef __APPLE__
@@ -546,6 +578,82 @@ void editorFits(const std::string& synth) {
                 viewRect.bottom);
     CHECK(view && frame.right == viewRect.right && frame.bottom == viewRect.bottom);
     CHECK(e.setPluginGuiVisible("p", false, err));
+}
+
+// With its one effect's file gone, the master runs no plugin host, after a reload too.
+void masterWithoutEffects(const std::string& gain) {
+    Engine e;
+    start(e);
+    std::string gone = pathToUtf8(pathFromUtf8(gain).parent_path() / "brack-test-gain-gone.clap");
+    std::replace(gone.begin(), gone.end(), '\\', '/');
+    std::string err;
+    CHECK(e.loadSessionJson(R"({"format": "brack-session", "masterEffects": [{"id": "gone", "path": ")" + gone + R"("}]})",
+                            err));
+    const size_t before = childrenOf(GetCurrentProcessId()).size();
+    EngineConfig cfg = e.config();
+    cfg.pluginsInProcess = true;
+    CHECK(e.setConfig(cfg, err));
+    cfg.pluginsInProcess = false;
+    CHECK(e.setConfig(cfg, err));
+    const size_t after = childrenOf(GetCurrentProcessId()).size();
+    std::printf("master with its effect gone: %zu plugin host(s), then %zu after a reload\n", before, after);
+    CHECK(after <= before);
+    const EngineSnapshot snap = e.snapshot();
+    CHECK(snap.masterEffects.size() == 1 && !snap.masterEffects[0].loaded);
+}
+
+// An effect removed with its editor open closes that editor alone.
+void effectEditorClosed(const std::string& synth, const std::string& gain) {
+    Engine e;
+    start(e);
+    std::string err;
+    CHECK(e.addPlugin({"p", synth, "", "", std::nullopt}, false, err) == "p");
+    CHECK(e.addEffect("p", 0, {"a", gain, "brack.test.gain", "", std::nullopt}, err) == "a");
+    CHECK(e.addEffect("p", 1, {"b", gain, "brack.test.gain", "", std::nullopt}, err) == "b");
+    for (const char* id : {"p", "a", "b"}) CHECK(e.setPluginGuiVisible(id, true, err));
+    auto closedBy = [&](const std::string& id) {
+        for (EngineEvent ev; e.pollEvent(ev);) {
+        }
+        CHECK(e.removePlugin(id, err));
+        std::vector<std::string> closed;
+        for (EngineEvent ev; e.pollEvent(ev);)
+            if (ev.type == EngineEvent::Type::EditorClosed) closed.push_back(ev.id);
+        return closed;
+    };
+    CHECK(closedBy("a") == std::vector<std::string>{"a"});  // one followed by another
+    CHECK(closedBy("b") == std::vector<std::string>{"b"});  // the chain's last
+    const EngineSnapshot snap = e.snapshot();
+    CHECK(snap.plugins.size() == 1 && snap.plugins[0].guiOpen && snap.plugins[0].effects.empty());
+    CHECK(e.setPluginGuiVisible("p", false, err));
+}
+
+// A chain reloaded, its instrument removed, or the rack cleared closes the chain's editors, each
+// reported.
+void chainEditorsClosed(const std::string& synth, const std::string& gain) {
+    Engine e;
+    start(e);
+    std::string err;
+    CHECK(e.addEffect("", 0, {"m", gain, "brack.test.gain", "", std::nullopt}, err) == "m");
+    auto closedBy = [&](auto change) {
+        if (e.snapshot().plugins.empty()) {
+            CHECK(e.addPlugin({"p", synth, "", "", std::nullopt}, false, err) == "p");
+            CHECK(e.addEffect("p", 0, {"a", gain, "brack.test.gain", "", std::nullopt}, err) == "a");
+        }
+        for (const char* id : {"p", "a", "m"}) CHECK(e.setPluginGuiVisible(id, true, err));
+        for (EngineEvent ev; e.pollEvent(ev);) {
+        }
+        change();
+        std::vector<std::string> closed;
+        for (EngineEvent ev; e.pollEvent(ev);)
+            if (ev.type == EngineEvent::Type::EditorClosed) closed.push_back(ev.id);
+        std::sort(closed.begin(), closed.end());
+        return closed;
+    };
+    using Ids = std::vector<std::string>;
+    CHECK(closedBy([&] { CHECK(e.reloadPlugin("a", err)); }) == (Ids{"a", "p"}));
+    CHECK(closedBy([&] { CHECK(e.reloadPlugin("m", err)); }) == Ids{"m"});
+    CHECK(closedBy([&] { CHECK(e.removePlugin("p", err)); }) == (Ids{"a", "p"}));
+    CHECK(closedBy([&] { e.clear(); }) == (Ids{"a", "m", "p"}));
 }
 
 // The plugin host's audio thread joins MMCSS's "Pro Audio" task, which runs it in the real-time
@@ -1223,8 +1331,10 @@ int run(int argc, char** argv) {
         setLogSink(nullptr);
         return g_failures ? 1 : 0;
     }
-    if (argc < 4) {
-        std::fprintf(stderr, "usage: test_isolation <brack-test-synth.clap> <vst2 synth> <vst3 synth>\n");
+    if (argc < 5) {
+        std::fprintf(stderr,
+                     "usage: test_isolation <brack-test-synth.clap> <vst2 synth> <vst3 synth> <brack-test-gain.clap> "
+                     "[<other architectures' brack-test-synth.clap>...]\n");
         return 2;
     }
     const std::string synth = argv[1];
@@ -1268,7 +1378,7 @@ int run(int argc, char** argv) {
     for (const Kind& k : kinds) goesDown(synth, k);
 
     for (int i = 1; i <= 3; ++i) soundsTheSame(argv[i]);
-    for (int i = 4; i < argc; ++i) otherArchitecture(synth, argv[i]);
+    for (int i = 5; i < argc; ++i) otherArchitecture(synth, argv[4], argv[i]);
     relativePath(synth);
 #ifndef _WIN32
     lowDescriptors(synth);
@@ -1278,6 +1388,11 @@ int run(int argc, char** argv) {
     endsWithBrack(argv[0], synth);
 #if defined(_WIN32) || defined(__APPLE__) || defined(BRACK_TEST_X11)
     editorFits(synth);
+#endif
+#ifdef _WIN32
+    effectEditorClosed(synth, argv[4]);
+    chainEditorsClosed(synth, argv[4]);
+    masterWithoutEffects(argv[4]);
 #endif
 #ifndef __APPLE__
     realtimeAudioThread(synth);

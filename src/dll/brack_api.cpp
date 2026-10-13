@@ -100,6 +100,17 @@ thread_local std::string t_configDevice;  // brack_get_config's audio_device
 
 // The engine names an unknown id in its error message only; these give the code.
 bool hasPlugin(brack_engine* e, const char* id) {
+    const auto s = e->engine.snapshot();
+    for (auto& p : s.plugins) {
+        if (p.id == str(id)) return true;
+        for (auto& fx : p.effects)
+            if (fx.id == str(id)) return true;
+    }
+    for (auto& fx : s.masterEffects)
+        if (fx.id == str(id)) return true;
+    return false;
+}
+bool hasInstrument(brack_engine* e, const char* id) {
     for (auto& p : e->engine.snapshot().plugins)
         if (p.id == str(id)) return true;
     return false;
@@ -146,6 +157,7 @@ extern "C" {
 
 BRACK_API uint32_t BRACK_CALL brack_api_version(void) { return BRACK_API_VERSION; }
 BRACK_API const char* BRACK_CALL brack_version_string(void) { return "Brack " BRACK_VERSION; }
+BRACK_API const char* BRACK_CALL brack_architecture(void) { return brack::buildArchitecture(); }
 BRACK_API const char* BRACK_CALL brack_last_error(void) {
     return t_lastErrorLiteral ? t_lastErrorLiteral : t_lastError.c_str();
 }
@@ -275,6 +287,30 @@ BRACK_API int BRACK_CALL brack_add_plugin_ex(brack_engine* e, const char* id, co
 BRACK_API int BRACK_CALL brack_add_plugin(brack_engine* e, const char* id, const char* path, const char* pluginId,
                                           char* idOut, size_t idOutSize) {
     return brack_add_plugin_ex(e, id, path, pluginId, 0, idOut, idOutSize);
+}
+
+BRACK_API int BRACK_CALL brack_add_effect(brack_engine* e, const char* ownerId, uint32_t index, const char* id,
+                                          const char* path, const char* pluginId, char* idOut, size_t idOutSize) {
+    return guarded(e, [&] {
+        if (!path || !*path) return fail(BRACK_ERR_INVALID_ARGUMENT, "plugin_path is required");
+        if (!idOutFits(id, idOut, idOutSize)) return fail(BRACK_ERR_BUFFER_TOO_SMALL, "id_out is too small");
+        brack::PluginConfig pc;
+        pc.id = str(id);
+        pc.path = path;
+        pc.pluginId = str(pluginId);
+        std::string err;
+        std::string newId = e->engine.addEffect(str(ownerId), index, pc, err);
+        if (newId.empty()) return str(ownerId).empty() || hasInstrument(e, ownerId) ? failed(err) : fail(BRACK_ERR_NOT_FOUND, err);
+        copyText(newId, idOut, idOutSize);
+        return ok();
+    });
+}
+
+BRACK_API int BRACK_CALL brack_set_effect_bypass(brack_engine* e, const char* effectId, int bypass) {
+    return guarded(e, [&] {
+        std::string err;
+        return e->engine.setEffectBypass(str(effectId), bypass != 0, err) ? ok() : pluginFailed(e, effectId, err);
+    });
 }
 
 BRACK_API int BRACK_CALL brack_move_plugin(brack_engine* e, const char* pluginId, uint32_t index) {
@@ -508,6 +544,15 @@ BRACK_API int BRACK_CALL brack_load_session_json(brack_engine* e, const char* js
 
 BRACK_API int BRACK_CALL brack_save_session_json(brack_engine* e, char* buf, size_t size, size_t* needed) {
     return guarded(e, [&] { return writeText(e->engine.saveSessionJson(), buf, size, needed); });
+}
+
+BRACK_API int BRACK_CALL brack_describe_session(const char* path, char* buf, size_t size, size_t* needed) {
+    try {
+        std::string json, err;
+        return brack::Engine::describeSessionFile(str(path), json, err) ? writeText(json, buf, size, needed) : failed(err);
+    } catch (const std::exception& ex) {
+        return failed(ex.what());
+    }
 }
 
 BRACK_API int BRACK_CALL brack_clear(brack_engine* e) {

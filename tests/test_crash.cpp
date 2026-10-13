@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -68,6 +69,129 @@ const std::string kFault = "segmentation fault", kOverflow = "bus error";  // th
 #else
 const std::string kFault = "segmentation fault", kOverflow = "segmentation fault";
 #endif
+
+// The test gain's state with this gain.
+std::vector<uint8_t> gainState(float gain) {
+    std::vector<uint8_t> state(sizeof gain);
+    std::memcpy(state.data(), &gain, sizeof gain);
+    return state;
+}
+
+// An effect that crashes silences its chain, and only that: the instrument with it goes quiet
+// (until the chain is loaded again), another instrument plays on. The test gain crashes in
+// process() once its gain is negative (test_effect/test_gain.cpp).
+void effectCrashes(const std::string& synth, const std::string& gain) {
+    for (bool inProcess : {true, false}) {
+        std::printf("an effect crashes %s\n", inProcess ? "in this process" : "in a plugin host process");
+        Engine e;
+        std::string err;
+        EngineConfig cfg;
+        cfg.pluginsInProcess = inProcess;
+        CHECK(e.setConfig(cfg, err));
+        CHECK(e.startManual(48000, 2, 256, err));
+        CHECK(e.addPlugin({"a", synth, "brack.test.synth", "", std::nullopt}, false, err) == "a");
+        CHECK(e.addPlugin({"c", synth, "brack.test.synth", "", std::nullopt}, false, err) == "c");
+        CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 0, 1.0f}}, err));
+        CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 1, 1.0f}}, err));
+        CHECK(e.addEffect("c", 0, {"x", gain, "brack.test.gain", "", std::nullopt}, err) == "x");
+        const uint8_t on[] = {0x90, 0x3C, 0x64};
+        CHECK(e.sendMidiToPlugin("a", 0, on, 3) == MidiSend::Sent);
+        CHECK(e.sendMidiToPlugin("c", 0, on, 3) == MidiSend::Sent);
+        auto peaks = renderPeaks(e, 4800);
+        CHECK(peaks[0] > 0.1f && peaks[1] > 0.05f);
+
+        CHECK(e.setPluginState("x", gainState(-1.0f), err));
+        EngineSnapshot snap;
+        const EngineSnapshot::Plugin* c = nullptr;
+        for (int i = 0; i < 1000 && !(c && c->crashed); ++i) {
+            renderPeaks(e, 256);
+            snap = e.snapshot();
+            c = find(snap, "c");
+        }
+        CHECK(c && c->crashed && c->effects.size() == 1 && c->effects[0].crashed);
+        if (c && !c->effects.empty()) {
+            std::printf("  x: %s\n  c: %s\n", c->effects[0].status.c_str(), c->status.c_str());
+            CHECK(has(c->effects[0].status, "crashed in process: " + kFault));
+            CHECK(has(c->status, "its chain crashed"));
+        }
+        CHECK(find(snap, "a") && !find(snap, "a")->crashed);
+        peaks = renderPeaks(e, 4800);
+        CHECK(peaks[0] > 0.1f && peaks[1] == 0.0f);
+        bool event = false;  // queued by the host thread's next idle pass, for the effect
+        for (int i = 0; i < 100 && !event; ++i) {
+            for (EngineEvent ev; e.pollEvent(ev);)
+                if (ev.type == EngineEvent::Type::PluginCrashed) event = ev.id == "x" && has(ev.message, kFault);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(event);
+
+        // Without the effect, the instrument loads again and plays.
+        CHECK(e.removePlugin("x", err));
+        CHECK(e.reloadPlugin("c", err));
+        CHECK(e.sendMidiToPlugin("c", 0, on, 3) == MidiSend::Sent);
+        peaks = renderPeaks(e, 4800);
+        std::printf("  c reloaded without x: %.3f\n", peaks[1]);
+        CHECK(peaks[1] > 0.1f);
+    }
+}
+
+// An effect that crashes taking its state, before it is in its chain, is left out: in this
+// process the instrument plays on; in a plugin host the process ends with it, and the chain plays
+// again once it is loaded again. The test gain crashes loading a gain of -1000.
+void effectCrashesLoading(const std::string& synth, const std::string& gain) {
+    for (bool inProcess : {true, false}) {
+        std::printf("an effect crashes taking its state %s\n", inProcess ? "in this process" : "in a plugin host process");
+        Engine e;
+        std::string err;
+        EngineConfig cfg;
+        cfg.pluginsInProcess = inProcess;
+        CHECK(e.setConfig(cfg, err));
+        CHECK(e.startManual(48000, 2, 256, err));
+        CHECK(e.addPlugin({"c", synth, "brack.test.synth", "", std::nullopt}, false, err) == "c");
+        CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 0, 1.0f}}, err));
+        err.clear();
+        CHECK(e.addEffect("c", 0, {"y", gain, "brack.test.gain", "", gainState(-1000.0f)}, err).empty());
+        std::printf("  %s\n", err.c_str());
+        CHECK(has(err, kFault));
+        const EngineSnapshot snap = e.snapshot();
+        const EngineSnapshot::Plugin* c = find(snap, "c");
+        CHECK(c && c->effects.empty() && c->crashed == !inProcess);
+        if (!inProcess) CHECK(e.reloadPlugin("c", err));
+        const uint8_t on[] = {0x90, 0x3C, 0x64};
+        CHECK(e.sendMidiToPlugin("c", 0, on, 3) == MidiSend::Sent);
+        CHECK(renderPeaks(e, 4800)[0] > 0.1f);
+    }
+}
+
+// The master's chain goes with its last effect; the crash of the next one's is reported too.
+void masterCrashesAgain(const std::string& synth, const std::string& gain) {
+    std::printf("the master's effects crash one after another\n");
+    Engine e;
+    std::string err;
+    EngineConfig cfg;
+    cfg.pluginsInProcess = false;
+    CHECK(e.setConfig(cfg, err));
+    CHECK(e.startManual(48000, 2, 256, err));
+    CHECK(e.addPlugin({"c", synth, "brack.test.synth", "", std::nullopt}, false, err) == "c");
+    CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 0, 1.0f}}, err));
+    for (const std::string id : {"m1", "m2"}) {
+        CHECK(e.addEffect("", 0, {id, gain, "brack.test.gain", "", std::nullopt}, err) == id);
+        const uint8_t on[] = {0x90, 0x3C, 0x64};
+        CHECK(e.sendMidiToPlugin("c", 0, on, 3) == MidiSend::Sent);
+        CHECK(renderPeaks(e, 4800)[0] > 0.05f);
+        CHECK(e.setPluginState(id, gainState(-1.0f), err));
+        bool event = false;
+        for (int i = 0; i < 200 && !event; ++i) {
+            renderPeaks(e, 256);
+            for (EngineEvent ev; e.pollEvent(ev);)
+                if (ev.type == EngineEvent::Type::PluginCrashed) event = ev.id == id;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::printf("  %s: %s\n", id.c_str(), event ? "reported" : "not reported");
+        CHECK(event);
+        CHECK(e.removePlugin(id, err));
+    }
+}
 
 struct Stage {
     const char* name;   // the file name part the test plugin looks for (crash_stage.h)
@@ -155,8 +279,8 @@ void moduleCrashes(const fs::path& plugin, const std::vector<Stage>& stages, con
 }  // namespace
 
 int run(int argc, char** argv) {
-    if (argc < 3) {
-        std::fprintf(stderr, "usage: test_crash <brack-test-synth.clap> <brack-test-synth.vst3>\n");
+    if (argc < 4) {
+        std::fprintf(stderr, "usage: test_crash <brack-test-synth.clap> <brack-test-synth.vst3> <brack-test-gain.clap>\n");
         return 2;
     }
     const std::string synth = argv[1];
@@ -306,6 +430,9 @@ int run(int argc, char** argv) {
         if (t) std::printf("t: %s\n", t->status.c_str());
 #endif
     }  // the engine goes, with the crashed "a" in it
+    effectCrashes(synth, argv[3]);
+    effectCrashesLoading(synth, argv[3]);
+    masterCrashesAgain(synth, argv[3]);
 
     // The copies that crashed stay loaded until the process exits; the next run replaces them.
     const fs::path tmp = fs::temp_directory_path() / ("brack_test_crash-" + std::string(buildArchitecture()));

@@ -1,12 +1,13 @@
-// The plugin host process: one plugin instance (or a scan's descriptions) for the Brack process
-// that started it. See remote/host_protocol.h; the link to Brack is remote/brack_link.h.
+// The plugin host process: one chain (or a scan's descriptions) for the Brack process that started
+// it. See remote/host_protocol.h; the link to Brack is remote/brack_link.h.
 #include <atomic>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <thread>
 
 #include "host_thread.h"
-#include "plugin/plugin.h"
+#include "plugin/chain.h"
 #include "remote/brack_link.h"
 #include "remote/plugin_host.h"
 #include "util/common.h"
@@ -19,6 +20,14 @@ using remote::ControlBlock;
 using remote::Message;
 
 namespace {
+
+Message pluginMessage(const PluginInstance& p) {
+    return {{"description", remote::toMessage(p.description())},
+            {"hasGui", p.hasGui()},
+            {"ports", remote::portsToMessage(p.notePorts(), p.audioInputs(), p.audioOutputs())},
+            {"active", p.isActive()},
+            {"latency", p.latency()}};
+}
 
 class Host final : public PluginHostListener {
 public:
@@ -36,7 +45,8 @@ public:
             Message reply;
             host_.invoke([&] {
                 reply = handle(op, request);
-                if (inst_ && inst_->crashed()) link_.endAfterCrash(inst_->crashReport());
+                endIfCrashed();
+                endIfPreparedCrashed();
             });
             reply["reply"] = op;
             if (!link_.send(reply) || op == "destroy") break;
@@ -46,29 +56,51 @@ public:
 
 private:
     // ---- PluginHostListener (host thread unless noted) ----
-    void pluginGuiClosed(HostedPlugin&) override { link_.send({{"note", "guiClosed"}}); }
-    void pluginEditorResized(HostedPlugin&, uint32_t w, uint32_t h) override {
-        link_.send({{"note", "resized"}, {"width", w}, {"height", h}});
+    void pluginGuiClosed(HostedPlugin& p) override {
+        if (auto i = indexOf(p)) link_.send({{"note", "guiClosed"}, {"plugin", *i}});
+    }
+    void pluginEditorResized(HostedPlugin& p, uint32_t w, uint32_t h) override {
+        if (auto i = indexOf(p)) link_.send({{"note", "resized"}, {"plugin", *i}, {"width", w}, {"height", h}});
     }
     void pluginStateChanged(HostedPlugin&) override {  // any thread
         std::atomic_ref(control_.stateChanges).fetch_add(1, std::memory_order_release);
     }
 
+    // Where `p` is in the chain; nothing once it has left it (a plugin being destroyed).
+    std::optional<size_t> indexOf(const HostedPlugin& p) const {
+        for (size_t i = 0; chain_ && i < chain_->size(); ++i)
+            if (&chain_->plugin(i) == &p) return i;
+        return std::nullopt;
+    }
+
+    // Any thread: a plugin crashed, so this process ends, saying which.
+    void endIfCrashed() {
+        if (!chain_ || !chain_->crashed()) return;
+        control_.crashedPlugin = (uint32_t)(chain_->crashedPlugin() + 1);
+        link_.endAfterCrash(chain_->crashReport());
+    }
+    // Host thread: likewise for the effect being prepared, which has no place in the chain
+    // (crashedPlugin stays 0: not known).
+    void endIfPreparedCrashed() {
+        if (chain_ && chain_->preparedCrashed()) link_.endAfterCrash(chain_->preparedInstance()->crashReport());
+    }
+
     Message handle(const std::string& op, const Message& m) {
         std::string error;
         if (op == "create") {
-            if (inst_) return {{"ok", false}, {"error", "this plugin host already has a plugin"}};
-            inst_ = createPluginInstance(host_, *this, m.value("path", ""), m.value("pluginId", ""), error);
-            if (!inst_ || !inst_->init(error)) {
-                if (inst_ && inst_->crashed()) link_.endAfterCrash(error);
-                inst_.reset();
-                return {{"ok", false}, {"error", error}};
+            if (chain_) return {{"ok", false}, {"error", "this plugin host already has a chain"}};
+            std::unique_ptr<PluginInstance> instrument;
+            if (m.contains("path")) {
+                instrument = createPluginInstance(host_, *this, m.value("path", ""), m.value("pluginId", ""), error);
+                if (!instrument || !instrument->init(error)) {
+                    if (instrument && instrument->crashed()) link_.endAfterCrash(error);
+                    return {{"ok", false}, {"error", error}};
+                }
             }
+            chain_ = std::make_unique<LocalChain>(host_, *this, std::move(instrument));
             std::thread([this] { audioLoop(); }).detach();  // not for a scan: no real-time thread to ask for
-            return {{"ok", true},
-                    {"description", remote::toMessage(inst_->description())},
-                    {"hasGui", inst_->hasGui()},
-                    {"ports", remote::portsToMessage(inst_->notePorts(), inst_->audioInputs(), inst_->audioOutputs())}};
+            if (!chain_->hasInstrument()) return {{"ok", true}};
+            return {{"ok", true}, {"plugin", pluginMessage(chain_->instance(0))}};
         }
         if (op == "describe") {
             auto descs = describePluginFile(pathFromUtf8(m.value("path", "")), error);
@@ -79,83 +111,132 @@ private:
             }
             return {{"ok", true}, {"plugins", list}, {"error", error}};
         }
-        if (!inst_) return {{"ok", false}, {"error", "no plugin"}};
-        if (op == "activate") return activate(m.value("rate", 0.0), m.value("maxFrames", 0u));
+        if (!chain_) return {{"ok", false}, {"error", "no chain"}};
+        if (op == "prepareEffect") {  // while the chain is processed
+            if (!chain_->prepareEffect(m.value("path", ""), m.value("pluginId", ""), error))
+                return {{"ok", false}, {"error", error}};
+            return {{"ok", true}, {"plugin", pluginMessage(*chain_->preparedInstance())}};
+        }
+        if (op == "insertEffect") {
+            PluginInstance* p = chain_->insertEffect(m.value("index", (size_t)0));
+            if (!p) return {{"ok", false}};
+            return {{"ok", true}, {"plugin", pluginMessage(*p)}};
+        }
+        if (op == "remove") {
+            chain_->remove(m.value("index", (size_t)0));
+            return {{"ok", true}};
+        }
+        if (op == "move") {
+            chain_->move(m.value("from", (size_t)0), m.value("to", (size_t)0));
+            return {{"ok", true}};
+        }
+        if (op == "bypass") {
+            chain_->setBypass(m.value("index", (size_t)0), m.value("bypass", false));
+            return {{"ok", true}};
+        }
+        if (op == "activate") return activate(m.value("rate", 0.0), m.value("maxFrames", 0u), m.value("busChannels", 0u));
         if (op == "deactivate") {
-            inst_->deactivate();
-            return {{"ok", true}};
-        }
-        if (op == "saveState") {
-            std::vector<uint8_t> state;
-            if (!inst_->saveState(state)) return {{"ok", false}};
-            return {{"ok", true}, {"state", Message::binary(std::move(state))}};
-        }
-        if (op == "loadState") {
-            const auto& bin = m.at("state").get_binary();
-            return {{"ok", inst_->loadState(std::vector<uint8_t>(bin.begin(), bin.end()))}};
-        }
-        if (op == "openGui") {
-            void* parent = (void*)(uintptr_t)m.value("parent", (uint64_t)0);
-            const bool ok = inst_->openGui(error, parent);
-            return {{"ok", ok}, {"error", error}};
-        }
-        if (op == "closeGui") {
-            inst_->closeGui();
-            return {{"ok", true}};
-        }
-        if (op == "setName") {
-            inst_->setDisplayName(m.value("name", ""));
+            chain_->deactivate();
             return {{"ok", true}};
         }
         if (op == "destroy") {
             host_.removeTimer(idleTimer_);
-            inst_.reset();
+            chain_.reset();
+            return {{"ok", true}};
+        }
+        // The plugin the request is about: one of the chain's, or the prepared effect.
+        const size_t i = m.value("plugin", (size_t)0);
+        PluginInstance* target = m.value("prepared", false) ? chain_->preparedInstance()
+                                 : i < chain_->size()       ? &chain_->instance(i)
+                                                            : nullptr;
+        if (!target) return {{"ok", false}, {"error", "no such plugin in the chain"}};
+        PluginInstance& p = *target;
+        if (op == "saveState") {
+            std::vector<uint8_t> state;
+            if (!p.saveState(state)) return {{"ok", false}};
+            return {{"ok", true}, {"state", Message::binary(std::move(state))}};
+        }
+        if (op == "loadState") {
+            const auto& bin = m.at("state").get_binary();
+            return {{"ok", p.loadState(std::vector<uint8_t>(bin.begin(), bin.end()))}};
+        }
+        if (op == "openGui") {
+            void* parent = (void*)(uintptr_t)m.value("parent", (uint64_t)0);
+            const bool ok = p.openGui(error, parent);
+            return {{"ok", ok}, {"error", error}};
+        }
+        if (op == "closeGui") {
+            p.closeGui();
+            return {{"ok", true}};
+        }
+        if (op == "setName") {
+            p.setDisplayName(m.value("name", ""));
             return {{"ok", true}};
         }
         return {{"ok", false}, {"error", "unknown request: " + op}};
     }
 
-    Message activate(double rate, uint32_t maxFrames) {
+    Message activate(double rate, uint32_t maxFrames, uint32_t busChannels) {
         std::string error;
-        if (!inst_->activate(rate, maxFrames, error)) return {{"ok", false}, {"error", error}};
-        // The outputs, port after port, channel after channel, in shared memory made anew at each
-        // activation: Brack maps the one it was given until the next.
+        if (!chain_->activate(rate, maxFrames, busChannels, error)) return {{"ok", false}, {"error", error}};
+        // The master's bus in, then the outputs, port after port, channel after channel, in shared
+        // memory made anew at each activation: Brack maps the one it was given until the next.
+        inputChannels_ = chain_->hasInstrument() ? 0 : chain_->busChannels();
         channels_.clear();
-        for (uint32_t p = 0; p < inst_->audioOutputs().size(); ++p)
-            for (uint32_t c = 0; c < inst_->audioOutputs()[p].channels; ++c) channels_.push_back({p, c});
+        Message outputPorts = Message::array();
+        for (uint32_t p = 0; p < chain_->outputPorts(); ++p) {
+            outputPorts.push_back(chain_->outputChannels(p));
+            for (uint32_t c = 0; c < chain_->outputChannels(p); ++c) channels_.push_back({p, c});
+        }
         maxFrames_ = maxFrames;
         rate_ = rate;
-        const uint64_t bytes = (uint64_t)channels_.size() * maxFrames * sizeof(float);
-        Message outputs;
-        outputsView_ = bytes ? link_.createOutputs(bytes, outputs) : nullptr;
-        if (bytes && !outputsView_) {
-            inst_->deactivate();
-            return {{"ok", false}, {"error", "cannot share the plugin's outputs"}};
+        const uint64_t bytes = (uint64_t)(inputChannels_ + channels_.size()) * maxFrames * sizeof(float);
+        Message ref;
+        channelsView_ = bytes ? link_.createOutputs(bytes, ref) : nullptr;
+        if (bytes && !channelsView_) {
+            chain_->deactivate();
+            return {{"ok", false}, {"error", "cannot share the chain's channels"}};
         }
+        inputPtrs_.clear();
+        for (uint32_t c = 0; c < inputChannels_; ++c) inputPtrs_.push_back(channelsView_ + c * maxFrames);
         restartSent_ = false;
+        Message plugins = Message::array();
+        for (size_t i = 0; i < chain_->size(); ++i) plugins.push_back(pluginMessage(chain_->instance(i)));
         return {{"ok", true},
-                {"latency", inst_->latency()},
-                {"ports", remote::portsToMessage(inst_->notePorts(), inst_->audioInputs(), inst_->audioOutputs())},
-                {"outputs", outputs}};
+                {"plugins", plugins},
+                {"inputChannels", inputChannels_},
+                {"outputPorts", outputPorts},
+                {"channels", ref}};
     }
 
     void idle() {
-        if (!inst_) return;
-        inst_->idle();
-        if (inst_->crashed()) link_.endAfterCrash(inst_->crashReport());
-        if (inst_->restartPending() && !restartSent_) {
+        if (!chain_) return;
+        chain_->idle();
+        endIfCrashed();
+        endIfPreparedCrashed();
+        if (chain_->restartPending() && !restartSent_) {
             restartSent_ = true;
             link_.send({{"note", "restart"}});
         }
+        // Which plugins failed to start or to process (an effect's failure does not fail the
+        // block), whenever that changes.
+        std::vector<size_t> failed;
+        for (size_t i = 0; i < chain_->size(); ++i)
+            if (chain_->instance(i).processFailed()) failed.push_back(i);
+        if (failed != failedSent_) {
+            failedSent_ = failed;
+            link_.send({{"note", "failed"}, {"plugins", failed}});
+        }
     }
 
-    // The plugin's audio thread. Brack signals "process" only while the plugin is active, and
-    // waits for "done" before anything else happens to it.
+    // The chain's audio thread. Brack signals "process" only while the chain is active, and waits
+    // for "done" before anything else happens to it.
     void audioLoop() {
         link_.protectThisThread();
         setCurrentThreadIsAudio(true);
         InputEventList events;
         std::pair<double, uint32_t> raisedFor;
+        bool stopped = false;
         while (link_.waitForBlock()) {
             ControlBlock& c = control_;
             if (raisedFor != std::pair(rate_, maxFrames_)) {
@@ -164,24 +245,30 @@ private:
             }
             events.clear();
             if (c.command == (uint32_t)BlockCommand::Stop) {
-                inst_->requestStopProcessing();
-                inst_->process(0, c.steadyTime, events);
+                chain_->requestStopProcessing();
+                chain_->beginProcess(0, c.steadyTime, events, nullptr);
+                chain_->endProcess();
+                stopped = true;
                 c.result = (uint32_t)BlockResult::Stopped;
             } else {
+                if (stopped) chain_->resumeProcessing();
+                stopped = false;
                 const uint32_t n = std::min(c.eventCount, remote::kMaxEvents);
                 for (uint32_t i = 0; i < n; ++i) {
                     const remote::MidiEvent& e = c.events[i];
                     const uint8_t* data = e.size <= sizeof e.bytes ? e.bytes : c.sysex + e.offset;
                     if (e.size > sizeof e.bytes && (uint64_t)e.offset + e.size > remote::kSysexBytes) continue;
-                    inst_->appendMidi(events, e.port, data, e.size, e.time);
+                    chain_->appendMidi(events, e.port, data, e.size, e.time);
                 }
-                const bool ok = inst_->process(c.frames, c.steadyTime, events);
-                if (inst_->crashed()) link_.endAfterCrash(inst_->crashReport());
+                chain_->beginProcess(c.frames, c.steadyTime, events, inputPtrs_.data());
+                const bool ok = chain_->endProcess();
+                endIfCrashed();
                 if (ok) {
                     const uint32_t frames = std::min(c.frames, maxFrames_);
+                    float* outputs = channelsView_ + (size_t)inputChannels_ * maxFrames_;
                     for (size_t i = 0; i < channels_.size(); ++i)
-                        if (const float* src = inst_->outputChannel(channels_[i].first, channels_[i].second))
-                            std::memcpy(outputsView_ + i * maxFrames_, src, frames * sizeof(float));
+                        if (const float* src = chain_->outputChannel(channels_[i].first, channels_[i].second))
+                            std::memcpy(outputs + i * maxFrames_, src, frames * sizeof(float));
                 }
                 c.result = (uint32_t)(ok ? BlockResult::Audio : BlockResult::Failed);
             }
@@ -193,14 +280,16 @@ private:
     ControlBlock& control_;
     HostThread host_;
     uint32_t idleTimer_ = 0;
-    std::unique_ptr<PluginInstance> inst_;
+    std::unique_ptr<LocalChain> chain_;
     bool restartSent_ = false;  // host thread
+    std::vector<size_t> failedSent_;  // host thread: the last "failed" note's
 
     // Set on the host thread while the audio thread waits (see audioLoop()).
-    float* outputsView_ = nullptr;
-    uint32_t maxFrames_ = 0;
+    float* channelsView_ = nullptr;
+    uint32_t maxFrames_ = 0, inputChannels_ = 0;
     double rate_ = 0;
-    std::vector<std::pair<uint32_t, uint32_t>> channels_;  // port, channel
+    std::vector<const float*> inputPtrs_;
+    std::vector<std::pair<uint32_t, uint32_t>> channels_;  // the outputs': port, channel
 };
 
 }  // namespace

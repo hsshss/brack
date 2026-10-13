@@ -190,7 +190,6 @@ bool ClapInstance::activatePlugin(double sampleRate, uint32_t maxFrames, std::st
     };
     build(audioIns_, inPtrs_, inBufs_);
     build(audioOuts_, outPtrs_, outBufs_);
-    for (auto& b : inBufs_) b.constant_mask = ~0ull;  // silent inputs
     if (!plugin_->activate(plugin_, sampleRate, 1, maxFrames)) {
         error = "activate failed (" + desc_.name + ")";
         return false;
@@ -240,6 +239,7 @@ bool ClapInstance::processPlugin(uint32_t frames, uint64_t steadyTime, const Inp
     p.audio_outputs_count = (uint32_t)outBufs_.size();
     p.in_events = in.get();
     p.out_events = &outEvents_;
+    for (size_t i = 0; i < inBufs_.size(); ++i) inBufs_[i].constant_mask = inputSilent(i) ? ~0ull : 0;
     for (auto& b : outBufs_) b.constant_mask = 0;
     if (plugin_->process(plugin_, &p) == CLAP_PROCESS_ERROR) return false;
     if (flushRequested_) flushRequested_ = false;  // in/out events were exchanged by process()

@@ -81,6 +81,11 @@ float segmentedWidth(std::span<const char* const> labels);
 
 bool toggleSwitch(const char* id, bool& on);
 
+// A box and its label at the cursor, `height` tall; clicking either flips `on`. The label may
+// hide its id after "##"; with no label text it is the box alone.
+bool checkbox(const char* label, bool& on, float height, float fontSize = 13);
+float checkboxWidth(const char* label, float fontSize = 13);
+
 // A tag such as a plugin's format; drawn only.
 void badge(ImVec2 pos, std::string_view s, ImFont* font, float size, ImU32 bg, ImU32 border, ImU32 textCol, float padX);
 ImVec2 badgeSize(std::string_view s, ImFont* font, float size, float padX);

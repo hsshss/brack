@@ -396,9 +396,7 @@ private:
             eventList_->count = (int32_t)count;
             dispatch(VST_EFFECT_OPCODE_EVENT, 0, 0, eventList_.get());
         }
-        // Plugins may process in place or leave a silent output untouched: start from silence.
-        for (auto& port : inPtrs_)
-            for (float* c : port) std::memset(c, 0, frames * sizeof(float));
+        // Plugins may leave a silent output untouched: start from silence.
         for (float* c : outFlat_) std::memset(c, 0, frames * sizeof(float));
         if (effect_->flags & VST_EFFECT_FLAG_SUPPORTS_FLOAT)
             effect_->process_float(effect_, inFlat_.data(), outFlat_.data(), (int32_t)frames);

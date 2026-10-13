@@ -1,6 +1,6 @@
 #pragma once
 // Brack's end of one plugin host process (remote/host_protocol.h), per OS: host_process_win32.cpp,
-// host_process_posix.cpp. RemotePlugin and RemoteDescriber (remote_plugin.cpp) drive it the same
+// host_process_posix.cpp. RemoteChain and RemoteDescriber (remote_chain.cpp) drive it the same
 // way everywhere.
 
 #include <chrono>
@@ -26,7 +26,7 @@ public:
     // Sends a request and waits for its reply, handing notes that arrive meanwhile to onNote.
     // A host that does not answer within `timeout` is ended.
     virtual Outcome call(const remote::Message& request, remote::Message& reply, std::chrono::milliseconds timeout) = 0;
-    // Notes that arrived since the last call (host thread, between calls).
+    // Notes that arrived since the last call. Neither this nor call() runs during the other.
     virtual void pollNotes() = 0;
     virtual bool running() = 0;
     virtual void terminate() = 0;  // any thread

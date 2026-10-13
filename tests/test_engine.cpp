@@ -1,10 +1,17 @@
 // End-to-end engine test in manual render mode with the test synth.
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "engine.h"
@@ -51,11 +58,316 @@ bool containsInOrder(const std::vector<std::string>& lines, const std::vector<st
     return k == expected.size();
 }
 
+// Each output's peak over `total` frames, after a buffer to let a change settle (through the SRC).
+std::vector<float> settledPeaks(Engine& e, uint32_t total) {
+    renderPeak(e, 2, 512, 2048);
+    std::vector<std::vector<float>> buf(2, std::vector<float>(512));
+    float* ptrs[2] = {buf[0].data(), buf[1].data()};
+    std::vector<float> peak(2, 0.0f);
+    for (uint32_t done = 0; done < total; done += 512) {
+        e.render(ptrs, 2, 512);
+        for (int c = 0; c < 2; ++c)
+            for (float v : buf[c]) peak[c] = std::max(peak[c], std::fabs(v));
+    }
+    return peak;
+}
+
+bool about(float value, float expected) { return std::fabs(value - expected) <= expected * 0.03f; }
+
+std::vector<std::string> effectIds(const std::vector<EngineSnapshot::Plugin>& effects) {
+    std::vector<std::string> ids;
+    for (auto& p : effects) ids.push_back(p.id);
+    return ids;
+}
+
+std::vector<uint8_t> gainState(float gain) {
+    std::vector<uint8_t> s(sizeof gain);
+    std::memcpy(s.data(), &gain, sizeof gain);
+    return s;
+}
+
+// Effects on an instrument and on the master: in this process, then in plugin host processes.
+// The gains (test_effect/) each halve what comes in, so a chain is heard by its peak alone.
+void chains(const std::string& synth, const std::string& gain, const std::string& gainVst2, const std::string& gainVst3) {
+    for (bool inProcess : {true, false}) {
+        std::printf("effects %s\n", inProcess ? "in this process" : "in plugin host processes");
+        Engine e;
+        std::string err;
+        EngineConfig cfg;
+        cfg.pluginsInProcess = inProcess;
+        cfg.processSampleRate = 96000;  // the master's effects come before the SRC
+        CHECK(e.setConfig(cfg, err));
+        CHECK(e.startManual(48000, 2, 512, err));
+        CHECK(e.addPlugin({"s", synth, "brack.test.synth", "", std::nullopt}, true, err) == "s");
+        const uint8_t on[] = {0x90, 0x3C, 0x64};
+        CHECK(e.sendMidiToPlugin("s", 0, on, 3) == MidiSend::Sent);
+        const float dry = settledPeaks(e, 4800)[0];
+        CHECK(dry > 0.1f);
+
+        // One effect, then one of each format in the chain, each halving.
+        CHECK(e.addEffect("s", 0, {"g", gain, "brack.test.gain", "", std::nullopt}, err) == "g");
+        CHECK(about(settledPeaks(e, 4800)[0], dry * 0.5f));
+        CHECK(e.addEffect("s", 1, {"g3", gainVst3, "", "", std::nullopt}, err) == "g3");
+        CHECK(e.addEffect("s", 9, {"g2", gainVst2, "", "", std::nullopt}, err) == "g2");  // clamped: the end
+        auto peaks = settledPeaks(e, 4800);
+        std::printf("  dry %.3f, through CLAP, VST3, VST2 %.3f %.3f\n", dry, peaks[0], peaks[1]);
+        CHECK(about(peaks[0], dry * 0.125f) && about(peaks[1], dry * 0.125f));
+        auto snap = e.snapshot();
+        CHECK(snap.plugins.size() == 1 && effectIds(snap.plugins[0].effects) == std::vector<std::string>({"g", "g3", "g2"}));
+        for (auto& fx : snap.plugins[0].effects) CHECK(fx.loaded && fx.active && fx.separateProcess == !inProcess);
+
+        // Bypassed, an effect lets what comes to it through.
+        CHECK(e.setEffectBypass("g3", true, err));
+        CHECK(about(settledPeaks(e, 4800)[0], dry * 0.25f));
+        CHECK(e.snapshot().plugins[0].effects[1].bypass);
+        CHECK(e.setEffectBypass("g3", false, err));
+        CHECK(!e.setEffectBypass("s", true, err));  // an instrument
+
+        // A mono effect takes the bus's first channel and leaves the second as it was.
+        CHECK(e.addEffect("s", 0, {"m", gain, "brack.test.gain-mono", "", std::nullopt}, err) == "m");
+        peaks = settledPeaks(e, 4800);
+        CHECK(about(peaks[0], dry * 0.0625f) && about(peaks[1], dry * 0.125f));
+        CHECK(e.removePlugin("m", err));
+
+        // Moved among the chain's effects; a state, the name and the order survive a session.
+        CHECK(e.movePlugin("g2", 0, err));
+        CHECK(effectIds(e.snapshot().plugins[0].effects) == std::vector<std::string>({"g2", "g", "g3"}));
+        CHECK(e.setPluginState("g", gainState(0.25f), err));
+        CHECK(about(settledPeaks(e, 4800)[0], dry * 0.0625f));
+        CHECK(e.setPluginName("g", "Quarter", err));
+        CHECK(e.setEffectBypass("g2", true, err));
+
+        // The master's effects take the mix.
+        CHECK(e.addEffect("", 0, {"mg", gain, "brack.test.gain", "", std::nullopt}, err) == "mg");
+        CHECK(about(settledPeaks(e, 4800)[0], dry * 0.0625f));
+        CHECK(e.snapshot().masterEffects.size() == 1);
+        const std::string session = e.saveSessionJson();
+
+        // What is not an effect, or not a plugin's to have.
+        CHECK(e.addEffect("s", 0, {"x", synth, "brack.test.synth", "", std::nullopt}, err).empty());
+        std::printf("  an instrument as an effect: %s\n", err.c_str());
+        CHECK(err.find("not an effect") != std::string::npos);
+        CHECK(e.addEffect("nope", 0, {"", gain, "", "", std::nullopt}, err).empty());
+        CHECK(e.addEffect("s", 0, {"s", gain, "", "", std::nullopt}, err).empty());  // the id is taken
+        CHECK(e.addMidiSource({"keys", MidiSourceKind::Api, ""}, err) == "keys");
+        CHECK(!e.addMidiRoute({"keys", "g", 0}, err));
+        CHECK(e.sendMidiToPlugin("g", 0, on, 3) == MidiSend::UnknownId);
+
+        // An instrument goes with its effects; the master's last effect, with its chain.
+        CHECK(e.removePlugin("mg", err));
+        CHECK(e.snapshot().masterEffects.empty());
+        CHECK(e.removePlugin("s", err));
+        CHECK(e.snapshot().plugins.empty() && !e.setPluginName("g", "x", err));
+
+        Engine r;
+        CHECK(r.loadSessionJson(session, err));
+        CHECK(r.startManual(48000, 2, 512, err));
+        snap = r.snapshot();
+        CHECK(snap.plugins.size() == 1 && effectIds(snap.plugins[0].effects) == std::vector<std::string>({"g2", "g", "g3"}));
+        CHECK(snap.plugins.size() == 1 && snap.plugins[0].effects[1].name == "Quarter" && snap.plugins[0].effects[0].bypass);
+        CHECK(snap.masterEffects.size() == 1 && snap.masterEffects[0].active);
+        CHECK(r.sendMidiToPlugin("s", 0, on, 3) == MidiSend::Sent);
+        peaks = settledPeaks(r, 4800);
+        std::printf("  from the session %.3f (expected %.3f)\n", peaks[0], dry * 0.0625f);
+        CHECK(about(peaks[0], dry * 0.0625f));
+        CHECK(r.saveSessionJson() == session);
+
+        // An effect that fails to process is passed over, as if bypassed, and says so.
+        CHECK(r.setPluginState("g", gainState(1000.0f), err));
+        peaks = settledPeaks(r, 4800);
+        bool failed = false;
+        for (int i = 0; i < 100 && !failed; ++i) {  // a plugin host tells within an idle pass
+            failed = r.snapshot().plugins[0].effects[1].failed;
+            if (!failed) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::printf("  an effect failing to process: %s, %.3f (expected %.3f)\n", failed ? "failed" : "not failed",
+                    peaks[0], dry * 0.25f);
+        CHECK(failed && about(peaks[0], dry * 0.25f));
+    }
+}
+
+// While an effect loads (the slow gain: 300 ms), its instrument plays on, and the mix is never
+// heard without the master's effects.
+void editWhilePlaying(const std::string& synth, const std::string& gain) {
+    for (bool inProcess : {true, false}) {
+        Engine e;
+        std::string err;
+        EngineConfig cfg;
+        cfg.pluginsInProcess = inProcess;
+        CHECK(e.setConfig(cfg, err));
+        CHECK(e.startManual(48000, 2, 256, err));
+        CHECK(e.addPlugin({"s", synth, "brack.test.synth", "", std::nullopt}, true, err) == "s");
+        const uint8_t on[] = {0x90, 0x3C, 0x64};
+        CHECK(e.sendMidiToPlugin("s", 0, on, 3) == MidiSend::Sent);
+        CHECK(e.addEffect("", 0, {"mg", gain, "brack.test.gain", "", std::nullopt}, err) == "mg");
+        // Each block's peak, rendered on a thread of its own, paced as by a device, while `edit` runs.
+        auto during = [&](const std::function<void()>& edit) {
+            std::atomic<bool> done{false};
+            std::vector<float> peaks;
+            std::thread audio([&] {
+                std::vector<std::vector<float>> buf(2, std::vector<float>(256));
+                float* ptrs[2] = {buf[0].data(), buf[1].data()};
+                while (!done) {
+                    e.render(ptrs, 2, 256);
+                    float peak = 0;
+                    for (auto& b : buf)
+                        for (float v : b) peak = std::max(peak, std::fabs(v));
+                    peaks.push_back(peak);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            });
+            edit();
+            done = true;
+            audio.join();
+            return peaks;
+        };
+        auto silent = [](const std::vector<float>& peaks) {
+            return (size_t)std::count_if(peaks.begin(), peaks.end(), [](float p) { return p < 1e-4f; });
+        };
+
+        const float before = settledPeaks(e, 4800)[0];
+        auto peaks = during([&] { CHECK(e.addEffect("s", 0, {"si", gain, "brack.test.gain-slow", "", std::nullopt}, err) == "si"); });
+        std::printf("effect added to a playing instrument (%s): %zu of %zu blocks silent\n",
+                    inProcess ? "in this process" : "in plugin host processes", silent(peaks), peaks.size());
+        CHECK(peaks.size() >= 10 && silent(peaks) <= 2);
+
+        const float level = settledPeaks(e, 4800)[0];
+        CHECK(about(level, before * 0.5f));
+        peaks = during([&] { CHECK(e.addEffect("", 1, {"sm", gain, "brack.test.gain-slow", "", std::nullopt}, err) == "sm"); });
+        const float loudest = *std::max_element(peaks.begin(), peaks.end());
+        std::printf("effect added to the master: %zu of %zu blocks silent, loudest %.3f (through its effects %.3f)\n",
+                    silent(peaks), peaks.size(), loudest, level);
+        CHECK(peaks.size() >= 10 && silent(peaks) <= 2 && loudest <= level * 1.05f);
+        CHECK(about(settledPeaks(e, 4800)[0], level * 0.5f));
+    }
+}
+
+// An effect for a chain in a plugin host loads on the caller's thread: the host thread answers
+// meanwhile, and the chain may change under it.
+void effectLoadsAside(const std::string& synth, const std::string& gain) {
+    Engine e;
+    std::string err;
+    EngineConfig cfg;
+    cfg.pluginsInProcess = false;
+    CHECK(e.setConfig(cfg, err));
+    CHECK(e.startManual(48000, 2, 256, err));
+    CHECK(e.addPlugin({"s", synth, "brack.test.synth", "", std::nullopt}, true, err) == "s");
+    // `add` on a thread of its own, `meanwhile` on this one once the effect has begun loading.
+    auto alongside = [](const std::function<void()>& add, const std::function<void()>& meanwhile) {
+        std::thread t(add);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));  // of the slow gain's 300
+        meanwhile();
+        t.join();
+    };
+
+    using Clock = std::chrono::steady_clock;
+    Clock::duration longest{};
+    std::atomic<bool> added{false};
+    alongside([&] {
+        std::string error;
+        CHECK(e.addEffect("s", 0, {"a", gain, "brack.test.gain-slow", "", std::nullopt}, error) == "a");
+        added = true;
+    }, [&] {
+        while (!added) {
+            const auto t0 = Clock::now();
+            e.config();  // a round trip to the host thread
+            longest = std::max(longest, Clock::now() - t0);
+        }
+    });
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(longest).count();
+    std::printf("the host thread while an effect loads in a plugin host: answers within %lld ms\n", (long long)ms);
+    CHECK(ms < 150);
+
+    // Two at once into one chain: one after the other.
+    std::string e1, e2, err1, err2;
+    alongside([&] { e1 = e.addEffect("s", 9, {"b", gain, "brack.test.gain-slow", "", std::nullopt}, err1); },
+              [&] { e2 = e.addEffect("s", 9, {"c", gain, "brack.test.gain-slow", "", std::nullopt}, err2); });
+    CHECK(e1 == "b" && e2 == "c");
+    CHECK(e.snapshot().plugins[0].effects.size() == 3);
+
+    // Loaded again, or removed, meanwhile: the effect fails, and the rest is as it should be.
+    for (bool remove : {false, true}) {
+        std::string id, error;
+        alongside([&] { id = e.addEffect("s", 0, {"x", gain, "brack.test.gain-slow", "", std::nullopt}, error); },
+                  [&] { CHECK(remove ? e.removePlugin("s", err) : e.reloadPlugin("s", err)); });
+        std::printf("%s meanwhile: %s\n", remove ? "removed" : "loaded again", error.c_str());
+        CHECK(id.empty() && error.find("removed or loaded again") != std::string::npos);
+        auto snap = e.snapshot();
+        if (remove) {
+            CHECK(snap.plugins.empty());
+        } else {
+            CHECK(snap.plugins.size() == 1 && effectIds(snap.plugins[0].effects) == std::vector<std::string>({"a", "b", "c"}));
+            for (auto& fx : snap.plugins[0].effects) CHECK(fx.loaded && fx.active);
+        }
+    }
+}
+
+// A session that leaves ids out, or gives an effect a taken one: every plugin gets an id of its own.
+void sessionIds(const std::string& synth, const std::string& gain) {
+    auto quoted = [](const std::string& s) {
+        std::string q = "\"";
+        for (char c : s) q += c == '\\' ? std::string("\\\\") : std::string(1, c);
+        return q + "\"";
+    };
+    auto plugin = [&](const std::string& id, const std::string& path, const std::string& extra = "") {
+        return "{" + (id.empty() ? "" : "\"id\": " + quoted(id) + ", ") + "\"path\": " + quoted(path) +
+               ", \"name\": \"Gain\"" + extra + "}";
+    };
+    const std::string fx = plugin("", gain), dup = plugin("dup", gain);
+    const std::string text = R"({"format": "brack-session", "engine": {"pluginsInProcess": true}, "plugins": [)" +
+                             plugin("", synth, ", \"effects\": [" + fx + ", " + fx + ", " + dup + ", " + dup + "]") + ", " +
+                             plugin("t", synth, ", \"effects\": [" + dup + "]") + R"(], "masterEffects": [)" +
+                             plugin("t", gain) + ", " + fx + "]}";
+    Engine e;
+    std::string err;
+    CHECK(e.loadSessionJson(text, err));
+    const EngineSnapshot snap = e.snapshot();
+    std::vector<std::string> ids;
+    for (auto& p : snap.plugins) {
+        ids.push_back(p.id);
+        for (auto& f : p.effects) ids.push_back(f.id);
+    }
+    for (auto& f : snap.masterEffects) ids.push_back(f.id);
+    std::printf("session ids:");
+    for (auto& id : ids) std::printf(" %s", id.c_str());
+    std::printf("\n");
+    const std::set<std::string> distinct(ids.begin(), ids.end());
+    CHECK(ids.size() == 9 && distinct.size() == ids.size() && !distinct.count(""));
+}
+
+// A note that arrives while an instrument's chain changes sounds once it has changed instead of
+// being lost: a reload loads the slow gain again (300 ms), and the note-on comes meanwhile.
+void midiWhileChanging(const std::string& synth, const std::string& gain) {
+    Engine e;
+    std::string err;
+    EngineConfig cfg;
+    cfg.pluginsInProcess = false;
+    CHECK(e.setConfig(cfg, err));
+    CHECK(e.startManual(48000, 2, 256, err));
+    CHECK(e.addPlugin({"s", synth, "brack.test.synth", "", std::nullopt}, true, err) == "s");
+    CHECK(e.addMidiSource({"keys", MidiSourceKind::Api, ""}, err) == "keys");
+    CHECK(e.addMidiRoute({"keys", "s", 0}, err));
+    CHECK(e.addEffect("s", 0, {"slow", gain, "brack.test.gain-slow", "", std::nullopt}, err) == "slow");
+    CHECK(renderPeak(e, 2, 256, 4800) < 1e-6f);  // silence before the note
+    std::thread reload([&] {
+        std::string error;
+        CHECK(e.reloadPlugin("s", error));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // of the slow gain's 300
+    const uint8_t on[] = {0x90, 0x3C, 0x64};
+    CHECK(e.sendMidiToSource("keys", on, 3) == MidiSend::Sent);
+    renderPeak(e, 2, 256, 2560);  // takes the note-on from its source while the chain reloads
+    reload.join();
+    const float peak = renderPeak(e, 2, 256, 9600);
+    std::printf("a note-on while a chain reloads: peak %.3f once reloaded\n", peak);
+    CHECK(peak > 0.01f);
+}
+
 }  // namespace
 
 int run(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr, "usage: test_engine <brack-test-synth.clap>\n");
+    if (argc < 5) {
+        std::fprintf(stderr, "usage: test_engine <brack-test-synth.clap> <brack-test-gain.clap> <gain vst2> <gain vst3>\n");
         return 2;
     }
     const std::string synth = argv[1];
@@ -245,6 +557,12 @@ int run(int argc, char** argv) {
             CHECK(s.mode == EngineMode::Stopped);
         }
     }
+
+    chains(synth, argv[2], argv[3], argv[4]);
+    sessionIds(synth, argv[2]);
+    editWhilePlaying(synth, argv[2]);
+    effectLoadsAside(synth, argv[2]);
+    midiWhileChanging(synth, argv[2]);
 
     std::printf(g_failures ? "FAILED (%d)\n" : "PASS\n", g_failures);
     return g_failures ? 1 : 0;

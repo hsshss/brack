@@ -53,9 +53,11 @@ The Brack of each architecture runs these plugins.
 | Plugin | A CLAP, VST3 or VST2 instance. An ID (for example `lead`) identifies it. It has note input ports and audio output ports. The file extension decides the format (`.clap`, `.vst3`, and for VST2 `.dll` on Windows, `.so` on Linux and `.vst` on macOS). |
 | MIDI source | `hardware` (opens an existing MIDI input port by name), `virtual` (a virtual port that Brack publishes), `api` (input only from the DLL or API) |
 | MIDI route | Connects a source to a plugin's note port. Connections can be many to many. |
+| Effect | A plugin that processes an instrument's main output, one after another. Effects run in the instrument's process, so only those built for the instrument's architecture run. They get no MIDI. Their IDs share the instruments' name space. |
+| Master | Effects that process the mix of all the instruments, one after another, before the SRC and the master volume. Only those built for Brack's architecture run. |
 | Audio route | Connects a channel of a plugin's output port to an output channel, with a gain. |
 | Master volume | A gain applied to all output channels after sample rate conversion (SRC). |
-| Session | Saves all of the above, the plugins' state (base64) and the audio settings to a JSON file. |
+| Session | Saves all of the above, the plugins' state (base64), the effects' bypass and the audio settings to a JSON file. An instrument's effects are in its `effects`, and the master's in `masterEffects` at the top level. |
 
 ## GUI
 
@@ -63,9 +65,13 @@ The Brack of each architecture runs these plugins.
 - The order of instruments and MIDI inputs is only for display and sessions. It does not affect routing or processing.
 - On macOS, the exclusive mode in Audio settings is ignored.
 
-The "Add instrument" list shows only the instruments that the scan found, each marked with its format (CLAP, VST3, VST2). Effects are not listed.
+The "Add instrument" list shows only the instruments that the scan found, each marked with its format (CLAP, VST3, VST2). The "Add effect" list shows the plugins that are not instruments and are built for the instrument's architecture (under MASTER, Brack's).
 
-- "From file..." lets you choose a `.clap`, `.vst3` or VST2 file directly. It loads effects too.
+- Effects process only the instrument's main output port. Its other output ports go to the routing as they are.
+- An effect's main input gets the first channels of the sound that reaches it, as many as the input has (silence for any it lacks). The effect's output replaces as many channels as the output has, and the rest pass on unchanged. A mono effect on a stereo instrument processes the left channel only.
+- A bypassed effect is not processed: the sound that reaches it goes on unchanged.
+
+- "From file..." lets you choose a `.clap`, `.vst3` or VST2 file directly.
 - A VST3 bundle is a folder. If you choose the file inside it (`Contents\x86_64-win\*.vst3`, or `Contents/x86_64-linux/*.so` on Linux), Brack loads the bundle. On macOS, you can choose the bundle itself.
 - Plugins of an architecture other than Brack's are marked with their architecture (`x86` and so on) in both the list and the rack.
 
@@ -129,15 +135,17 @@ The standard search paths are these.
 
 ## Plugin crashes
 
-Each plugin runs in a process of its own, separate from Brack (the plugin host `brack-host-<architecture>`). Whatever way a plugin crashes, and even if it hangs, only that process ends. Brack and the other plugins keep running.
+Each instrument runs together with its effects in a process of its own, separate from Brack (the plugin host `brack-host-<architecture>`). The master's effects also run together in one process. Whatever way a plugin crashes, and even if it hangs, only that process ends. Brack and the other instruments keep running.
+
+- When an effect crashes, the instrument and the effects in the same process go silent with it (for an effect under MASTER, everything does). The plugin that crashed shows why.
 
 - A crashed plugin shows "Crashed", goes silent, and its editor closes. The Log records in which call, and where in which module, it crashed (for example `crashed in process: access violation (0xC0000005) at Plugin.dll+0x1234`, or `stopped responding in process` when it hangs).
 - Brack gives up on a call that does not return after 2 seconds for audio processing, 60 seconds for saving or loading state and for creation, 30 seconds for activation and opening the editor, and 10 seconds for anything else.
-- The session gets the last state Brack could save from the plugin. "Reload" in the GUI (`brack_reload_plugin` in the DLL) loads the plugin again from that state in a new process. Its ID, name and routing stay the same.
+- The session gets the last state Brack could save from the plugin. "Reload" in the GUI (`brack_reload_plugin` in the DLL) loads the plugin again from that state in a new process. An instrument and its effects load again together. Their IDs, names and routing stay the same.
 - When Brack ends, all plugin hosts end too, including when Brack is killed.
 - Opening a session loads and activates all plugins at once. A slow plugin does not hold up the others.
   - Some plugins fail when two of them load at the same time. With SOUND Canvas VA, the second shows a "Parameter file1 read error" dialog and waits, or crashes while taking its state. "Load plugins one at a time" (a setting in the GUI, `--load-serially` in the CLI, `load_plugins_serially` in the DLL) then loads and activates them one after another, at the cost of opening more slowly.
-- Each plugin adds a process, so loading takes longer by the time a process takes to start. Audio passes between the processes block by block, and the plugins run in parallel.
+- Each instrument adds a process, so loading takes longer by the time a process takes to start. Audio passes between the processes block by block, and the instruments run in parallel. The master's effects run once all the instruments are done.
 
 "Run plugins inside Brack" (a setting in the GUI, `--in-process` in the CLI, `plugins_in_process` in the DLL) runs plugins in Brack's own process (except plugins of other architectures). Loading is faster, but the containment covers only the following.
 

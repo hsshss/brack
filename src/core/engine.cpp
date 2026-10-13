@@ -9,6 +9,7 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 #include "engine_internal.h"
 #include "host_thread.h"
@@ -52,7 +53,7 @@ bool isValidMessage(const uint8_t* d, uint32_t n) {
 }
 }  // namespace
 
-Engine::Engine() : host_(std::make_unique<HostThread>()) {
+Engine::Engine() : host_(std::make_unique<HostThread>()), master_(std::make_unique<PluginSlot>()) {
     scratch_.resize(1 << 16);
     idleTimer_ = host_->addTimer(10, [this] { onIdle(); });
 }
@@ -67,10 +68,12 @@ Engine::~Engine() {
             injectPlugins_.clear();
             injectSources_.clear();
         }
-        // Out of the lists before they go: closing an editor looks its plugin up in plugins_.
+        // Out of the lists before they go: closing an editor looks its plugin up in them.
         auto plugins = std::move(plugins_);
+        auto master = std::move(master_);
         auto sources = std::move(sources_);
         plugins.clear();
+        master.reset();
         sources.clear();
     });
 }
@@ -93,8 +96,10 @@ bool Engine::setConfig(const EngineConfig& cfg, std::string& error) {
         const bool hostingChanged = cfg.pluginsInProcess != config_.pluginsInProcess;
         config_ = cfg;
         if (hostingChanged)
-            for (auto& p : plugins_)
-                if (std::string err; !reloadSlot(*p, err)) logError(p->cfg.id + ": " + err);
+            for (PluginSlot* p : slots()) {
+                if (std::string err; !reloadSlot(*p, err)) logError((isMaster(*p) ? "master" : p->cfg.id) + ": " + err);
+                settleSlot(*p);
+            }
         if (prev == EngineMode::Device) ok = runDevice(Timeline::Continue, error);
         else if (prev == EngineMode::Manual) ok = runManual(Timeline::Continue, prevRate, prevCh, prevFrames, error);
     });
@@ -254,11 +259,17 @@ void Engine::switchOutputDevice() {
 
     std::string error;
     const std::string previous = device_.deviceName();
+    const uint32_t previousChannels = outChannels_;
     bool ok = device_.open(config_.audio,
                            [this](float* const* out, uint32_t ch, uint32_t n) { deviceRender(out, ch, n); }, error);
     if (ok) {
         uint32_t period = std::max<uint32_t>(device_.periodFrames(), config_.audio.bufferFrames);
         ok = configureOutput(device_.sampleRate(), device_.channels(), period, error);
+        // The master's bus is the output channels.
+        if (ok && master_->chain && master_->chain->isActive() && outChannels_ != previousChannels) {
+            master_->chain->deactivate();
+            if (std::string err; !activateSlot(*master_, err)) logError("master: " + err);
+        }
         if (ok) publishGraph();  // audio routes are filtered by the new channel count
     }
     rtReady_.store(true);
@@ -287,12 +298,12 @@ void Engine::stopRunning() {
         // clap: stop_processing belongs on the audio thread; the device callback (or,
         // while the device is away, the fallback clock) is rendering, so ask it and
         // wait for the acknowledgement.
-        for (auto& p : plugins_)
-            if (p->inst && p->inst->isActive()) p->inst->requestStopProcessing();
+        for (PluginSlot* p : slots())
+            if (p->chain && p->chain->isActive()) p->chain->requestStopProcessing();
         waitFor(
             [&] {
-                for (auto& p : plugins_)
-                    if (p->inst && p->inst->isActive() && !p->inst->stopProcessingAcknowledged()) return false;
+                for (PluginSlot* p : slots())
+                    if (p->chain && p->chain->isActive() && !p->chain->stopProcessingAcknowledged()) return false;
                 return true;
             },
             std::chrono::milliseconds(2000));
@@ -306,23 +317,24 @@ void Engine::stopRunning() {
     uint64_t s = audioSeq_.load();
     if (s & 1) waitFor([&] { return audioSeq_.load() != s; }, std::chrono::milliseconds(2000));
     delete graph_.exchange(nullptr);
-    for (auto& p : plugins_)
-        if (p->inst) p->inst->deactivate();
+    for (PluginSlot* p : slots())
+        if (p->chain) p->chain->deactivate();
     resampler_.reset();
     mode_ = EngineMode::Stopped;
 }
 
 void Engine::activateSlots() {
     std::vector<PluginSlot*> here, apart;
-    for (auto& p : plugins_)
-        if (p->inst) (p->inst->separateProcess() ? apart : here).push_back(p.get());
+    for (PluginSlot* p : slots())
+        if (p->chain) (p->chain->separateProcess() ? apart : here).push_back(p);
     auto activate = [this](PluginSlot& s) {
+        const std::string name = isMaster(s) ? "master" : s.cfg.id;
         std::string err;
         try {
-            if (!activateSlot(s, err)) logError(s.cfg.id + ": " + err);
+            if (!activateSlot(s, err)) logError(name + ": " + err);
         } catch (const std::exception& e) {
             s.status = e.what();
-            logError(s.cfg.id + ": " + e.what());
+            logError(name + ": " + e.what());
         }
     };
     if (config_.loadPluginsSerially) {
@@ -336,24 +348,33 @@ void Engine::activateSlots() {
 }
 
 bool Engine::activateSlot(PluginSlot& s, std::string& error) {
-    if (!s.inst->activate(procRate_, blockSize_, error)) {
+    if (!s.chain->activate(procRate_, blockSize_, isMaster(s) ? outChannels_ : 0, error)) {
         s.status = error;
         return false;
     }
     s.status = "ok";
+    for (auto& e : s.effects)
+        if (e.inst) e.status = e.inst->isActive() ? "ok" : "not active (see the log)";
     return true;
 }
 
-void Engine::publishGraph(const PluginSlot* exclude) {
+void Engine::publishGraph() {
+    using Change = PluginSlot::Change;
     auto* g = new RtGraph();
     std::map<std::string, uint32_t> nodeIndex;
     for (auto& p : plugins_) {
-        if (p.get() == exclude || !p->inst || !p->inst->isActive()) continue;
-        RtGraph::Node n{p->inst.get(), p->direct.get(), p->pending.get(), p->events.get(), {}};
+        const bool changing = p->change == Change::Stopping || p->change == Change::Out;
+        const bool processed = (p->change == Change::None || p->change == Change::Stopping) && p->chain && p->chain->isActive();
+        if (!processed && !changing) continue;
+        RtGraph::Node n{processed ? p->chain.get() : nullptr, p->direct.get(), p->pending.get(), p->events.get(), changing, {}};
         for (auto& r : audioRoutes_)
-            if (r.plugin == p->cfg.id && r.output < outChannels_) n.outs.push_back({r.port, r.channel, r.output, r.gain});
+            if (processed && r.plugin == p->cfg.id && r.output < outChannels_) n.outs.push_back({r.port, r.channel, r.output, r.gain});
         nodeIndex[p->cfg.id] = (uint32_t)g->nodes.size();
         g->nodes.push_back(std::move(n));
+    }
+    if (master_->chain && master_->chain->isActive()) {
+        if (master_->change == Change::None || master_->change == Change::Stopping) g->master = master_->chain.get();
+        else g->muteMix = true;
     }
     for (auto& s : sources_) {
         RtGraph::Source src{s->queue.get(), s->pending.get(), {}};
@@ -374,14 +395,32 @@ void Engine::publishGraph(const PluginSlot* exclude) {
     delete old;
 }
 
-void Engine::quiesceSlot(PluginSlot& s) {
-    // Manual mode: render() may not be called, so detach first; the plugin is
-    // then stopped from the host thread when it is deactivated.
-    if (s.inst && s.inst->isActive() && mode_ == EngineMode::Device) {
-        s.inst->requestStopProcessing();
-        waitFor([&] { return s.inst->stopProcessingAcknowledged(); }, std::chrono::milliseconds(2000));
+void Engine::quiesceSlot(PluginSlot& s, bool removing) {
+    using Change = PluginSlot::Change;
+    // Manual mode: render() may not be called, so detach first; the plugins are
+    // then stopped from the host thread when they are deactivated.
+    if (s.chain && s.chain->isActive() && mode_ == EngineMode::Device) {
+        if (!removing) {  // once this graph is in use, no MIDI goes to the chain
+            s.change = Change::Stopping;
+            publishGraph();
+        }
+        s.chain->requestStopProcessing();
+        waitFor([&] { return s.chain->stopProcessingAcknowledged(); }, std::chrono::milliseconds(2000));
     }
-    publishGraph(&s);
+    s.change = removing ? Change::Removed : Change::Out;
+    publishGraph();
+}
+
+void Engine::resumeSlot(PluginSlot& s) {
+    if (s.chain) s.chain->resumeProcessing();
+    settleSlot(s);
+}
+
+void Engine::settleSlot(PluginSlot& s) {
+    std::shared_ptr<HostedChain> empty;  // the master's, with no effect: no process for nothing
+    if (isMaster(s) && s.chain && s.chain->size() == 0) empty = std::move(s.chain);
+    s.change = PluginSlot::Change::None;
+    if (mode_ != EngineMode::Stopped) publishGraph();  // out of the graph before it goes
 }
 
 // ---------------------------------------------------------------------------
@@ -556,7 +595,10 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
         auto deliver = [&](const uint8_t* d, uint32_t size, uint16_t, uint64_t time) {
             for (auto& t : src.targets) {
                 auto& node = g.nodes[t.node];
-                node.plugin->appendMidi(*node.events, t.port, d, size, offset(time));
+                if (node.holdMidi)  // until its chain has changed; past due by then, so at once
+                    node.pending->add(d, size, t.port, time);
+                else
+                    node.chain->appendMidi(*node.events, t.port, d, size, offset(time));
             }
         };
         src.pending->take(due, deliver);
@@ -568,8 +610,9 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
     }
     for (auto& n : g.nodes) {
         if (!takeMidi) break;
+        if (n.holdMidi) continue;
         auto deliver = [&](const uint8_t* d, uint32_t size, uint16_t port, uint64_t time) {
-            n.plugin->appendMidi(*n.events, port, d, size, offset(time));
+            n.chain->appendMidi(*n.events, port, d, size, offset(time));
         };
         n.pending->take(due, deliver);
         n.direct->drain(scratch_, [&](const uint8_t* d, uint32_t size, uint16_t port, uint64_t time, int64_t when) {
@@ -581,14 +624,27 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
     }
 
     for (uint32_t c = 0; c < outChannels_; ++c) std::memset(mix_[c].data(), 0, frames * sizeof(float));
-    for (auto& n : g.nodes) n.plugin->beginProcess(frames, steadyTime_, *n.events);
+    for (auto& n : g.nodes)
+        if (n.chain) n.chain->beginProcess(frames, steadyTime_, *n.events, nullptr);
     for (auto& n : g.nodes) {
-        if (!n.plugin->endProcess()) continue;
+        if (!n.chain || !n.chain->endProcess()) continue;
         for (auto& o : n.outs) {
-            const float* src = n.plugin->outputChannel(o.port, o.channel);
+            const float* src = n.chain->outputChannel(o.port, o.channel);
             if (!src) continue;
             float* dst = mix_[o.output].data();
             for (uint32_t i = 0; i < frames; ++i) dst[i] += src[i] * o.gain;
+        }
+    }
+    if (g.muteMix) {
+        for (uint32_t c = 0; c < outChannels_; ++c) std::memset(mix_[c].data(), 0, frames * sizeof(float));
+    } else if (g.master) {
+        noEvents_.clear();
+        g.master->beginProcess(frames, steadyTime_, noEvents_, mixPtrs_.data());
+        const bool ok = g.master->endProcess();  // false: it crashed, or stops for a change; silent either way
+        for (uint32_t c = 0; c < outChannels_; ++c) {
+            const float* src = ok ? g.master->outputChannel(0, c) : nullptr;
+            if (src) std::memcpy(mix_[c].data(), src, frames * sizeof(float));
+            else if (!ok) std::memset(mix_[c].data(), 0, frames * sizeof(float));
         }
     }
     steadyTime_ += frames;
@@ -597,7 +653,7 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
 // ---------------------------------------------------------------------------
 // plugins
 
-std::string Engine::uniqueId(const std::string& base, bool plugin) const {
+std::string Engine::uniqueId(const std::string& base, bool plugin, const PluginSlot* adding) const {
     std::string b;
     for (char c : base) {
         unsigned char u = (unsigned char)c;
@@ -611,7 +667,14 @@ std::string Engine::uniqueId(const std::string& base, bool plugin) const {
     };
     b = cut(b, kMaxGeneratedId);
     if (b.empty()) b = plugin ? "plugin" : "midi";
-    auto taken = [&](const std::string& id) { return plugin ? findPlugin(id) != nullptr : findSource(id) != nullptr; };
+    auto inAdding = [&](const std::string& id) {
+        if (!adding) return false;
+        if (!isMaster(*adding) && adding->cfg.id == id) return true;
+        for (auto& e : adding->effects)
+            if (e.cfg.id == id) return true;
+        return false;
+    };
+    auto taken = [&](const std::string& id) { return plugin ? findAny(id) || inAdding(id) : findSource(id) != nullptr; };
     if (!taken(b)) return b;
     for (int i = 2;; ++i) {
         const std::string suffix = "-" + std::to_string(i);
@@ -620,10 +683,47 @@ std::string Engine::uniqueId(const std::string& base, bool plugin) const {
     }
 }
 
+void Engine::assignIds(PluginSlot& s) const {
+    if (!isMaster(s) && s.cfg.id.empty()) s.cfg.id = uniqueId(s.cfg.name, true, &s);
+    for (size_t i = 0; i < s.effects.size(); ++i) {
+        EffectSlot& e = s.effects[i];
+        const PluginRef r = findAny(e.cfg.id);
+        bool clash = (r && r.effect != &e) || (!isMaster(s) && e.cfg.id == s.cfg.id);
+        for (size_t j = 0; j < i; ++j) clash = clash || s.effects[j].cfg.id == e.cfg.id;
+        if (!e.cfg.id.empty() && !clash) continue;
+        const std::string was = std::exchange(e.cfg.id, {});
+        e.cfg.id = uniqueId(e.cfg.name.empty() ? "effect" : e.cfg.name, true, &s);
+        if (!was.empty()) logWarn("plugin id already in use: " + was + "; the effect is " + e.cfg.id + " instead");
+    }
+}
+
 Engine::PluginSlot* Engine::findPlugin(const std::string& id) const {
     for (auto& p : plugins_)
         if (p->cfg.id == id) return p.get();
     return nullptr;
+}
+
+PluginConfig& Engine::PluginRef::cfg() const { return effect ? effect->cfg : slot->cfg; }
+
+HostedPlugin* Engine::PluginRef::inst() const { return effect ? effect->inst : slot->instrument(); }
+
+Engine::PluginRef Engine::findAny(const std::string& id) const {
+    if (id.empty()) return {};
+    for (PluginSlot* s : slots()) {
+        if (!isMaster(*s) && s->cfg.id == id) return {s, nullptr};
+        for (auto& e : s->effects)
+            if (e.cfg.id == id) return {s, &e};
+    }
+    return {};
+}
+
+Engine::PluginRef Engine::findAny(const HostedPlugin& inst) const {
+    for (PluginSlot* s : slots()) {
+        if (s->instrument() == &inst) return {s, nullptr};
+        for (auto& e : s->effects)
+            if (e.inst == &inst) return {s, &e};
+    }
+    return {};
 }
 
 Engine::SourceSlot* Engine::findSource(const std::string& id) const {
@@ -644,71 +744,122 @@ void Engine::rebuildInjectionMaps() {
 // idle work).
 std::string Engine::addPlugin(const PluginConfig& cfg, bool autoRouteAudio, std::string& error) {
     bool taken = false;
-    host_->invoke([&] { taken = !cfg.id.empty() && findPlugin(cfg.id); });
+    host_->invoke([&] { taken = !cfg.id.empty() && findAny(cfg.id); });
     if (taken) {
         error = "plugin id already in use: " + cfg.id;
         return {};
     }
+    auto slot = std::make_unique<PluginSlot>();
+    slot->cfg = cfg;
     bool stateRejected = false;
-    auto inst = makePlugin(cfg, stateRejected, error);
-    if (!inst) return {};
+    slot->chain = makeChain(*slot, stateRejected, error);
+    if (!slot->chain) return {};
     std::string id;
-    host_->invoke([&] { id = installPlugin(cfg, std::move(inst), stateRejected, autoRouteAudio, error); });
+    host_->invoke([&] { id = installPlugin(std::move(slot), stateRejected, autoRouteAudio, error); });
     if (!id.empty()) markChanged();
     return id;
 }
 
-std::unique_ptr<HostedPlugin> Engine::makePlugin(const PluginConfig& cfg, bool& stateRejected, std::string& error) {
-    std::string architecture = pluginArchitecture(pathFromUtf8(cfg.path));
+std::unique_ptr<HostedChain> Engine::makeChain(PluginSlot& s, bool& stateRejected, std::string& error) {
+    const bool master = isMaster(s);
+    std::string architecture = master ? buildArchitecture() : pluginArchitecture(pathFromUtf8(s.cfg.path));
     if (architecture.empty()) architecture = buildArchitecture();  // the host process reports what is wrong
     bool inProcess = false;
     host_->invoke([&] { inProcess = config_.pluginsInProcess && architecture == buildArchitecture(); });
-    std::unique_ptr<HostedPlugin> inst;
+    std::unique_ptr<HostedChain> chain;
     auto make = [&] {
-        if (inProcess) inst = createPluginInstance(*host_, *this, cfg.path, cfg.pluginId, error);
-        else inst = createRemotePlugin(*this, cfg.path, cfg.pluginId, architecture);
-        if (!inst || !inst->init(error)) {
-            inst.reset();
-            error = cfg.path + ": " + error;
-            return;
+        if (inProcess) {
+            std::unique_ptr<PluginInstance> instrument;
+            if (!master) {
+                instrument = createPluginInstance(*host_, *this, s.cfg.path, s.cfg.pluginId, error);
+                if (!instrument || !instrument->init(error)) {
+                    error = s.cfg.path + ": " + error;
+                    return;
+                }
+            }
+            PluginHostListener& listener = *this;  // a private base: not convertible inside make_unique
+            chain = std::make_unique<LocalChain>(*host_, listener, std::move(instrument));
+        } else {
+            chain = master ? createRemoteMasterChain(*this, error)
+                           : createRemoteChain(*this, s.cfg.path, s.cfg.pluginId, architecture, error);
+            if (!chain) {
+                if (!master) error = s.cfg.path + ": " + error;
+                return;
+            }
         }
-        stateRejected = cfg.state && !cfg.state->empty() && !inst->loadState(*cfg.state);
+        stateRejected = !master && s.cfg.state && !s.cfg.state->empty() && !chain->plugin(0).loadState(*s.cfg.state);
+        s.unloadEffects();
+        size_t at = chain->size();  // s.chain is not this chain yet: no chainIndex()
+        for (EffectSlot& e : s.effects) {
+            const std::string effectArchitecture = pluginArchitecture(pathFromUtf8(e.cfg.path));
+            if (!effectArchitecture.empty() && effectArchitecture != architecture) {
+                e.status = "built for " + effectArchitecture + ", and its chain runs as " + architecture +
+                           ": an effect must be built for its instrument's architecture (the master's: Brack's)";
+                continue;
+            }
+            if (prepareEffect(*chain, e) && insertEffect(*chain, at, e)) ++at;
+        }
     };
     if (inProcess) host_->invoke(make);
     else make();
+    return chain;
+}
+
+HostedPlugin* Engine::prepareEffect(HostedChain& chain, EffectSlot& e) {
+    std::string error;
+    HostedPlugin* inst = chain.prepareEffect(e.cfg.path, e.cfg.pluginId, error);
+    if (!inst) {
+        e.status = e.cfg.path + ": " + error;
+        return nullptr;
+    }
+    if (e.cfg.state && !e.cfg.state->empty() && !inst->loadState(*e.cfg.state)) {
+        if (inst->crashed()) {  // left out rather than silence the chain
+            e.status = e.cfg.path + ": " + inst->crashReport();
+            return nullptr;
+        }
+        logWarn(e.cfg.id + ": plugin rejected the saved state");
+    }
+    e.cfg.pluginId = inst->description().id;
+    if (e.cfg.name.empty()) e.cfg.name = inst->description().name;
+    inst->setDisplayName(e.cfg.name);
     return inst;
 }
 
-std::string Engine::installPlugin(PluginConfig cfg, std::unique_ptr<HostedPlugin> inst, bool stateRejected,
-                                  bool autoRouteAudio, std::string& error) {
-    if (!cfg.id.empty() && findPlugin(cfg.id)) {
+bool Engine::insertEffect(HostedChain& chain, size_t index, EffectSlot& e) {
+    HostedPlugin* inst = chain.insertEffect(index);
+    if (!inst) {
+        e.status = chain.crashed() ? chain.crashReport() : "it could not be put in its chain";
+        return false;
+    }
+    if (e.bypass) chain.setBypass(index, true);
+    e.inst = inst;
+    e.status = "loaded";
+    return true;
+}
+
+std::string Engine::installPlugin(std::unique_ptr<PluginSlot> slot, bool stateRejected, bool autoRouteAudio,
+                                  std::string& error) {
+    PluginConfig& cfg = slot->cfg;
+    if (!cfg.id.empty() && findAny(cfg.id)) {
         error = "plugin id already in use: " + cfg.id;
         return {};
     }
-    const PluginDescription& desc = inst->description();
+    HostedPlugin& instrument = *slot->instrument();
+    const PluginDescription& desc = instrument.description();
     cfg.pluginId = desc.id;
     cfg.path = desc.path;
     if (cfg.name.empty()) cfg.name = desc.name;
-    if (cfg.id.empty()) cfg.id = uniqueId(cfg.name, true);
-    inst->setDisplayName(cfg.name);
+    assignIds(*slot);
+    instrument.setDisplayName(cfg.name);
     if (stateRejected) logWarn(cfg.id + ": plugin rejected the saved state");
-
-    auto slot = std::make_unique<PluginSlot>();
-    slot->cfg = cfg;
-    slot->inst = std::move(inst);
     slot->status = "loaded";
     if (mode_ != EngineMode::Stopped) {
         std::string err;
         if (!activateSlot(*slot, err)) logError(cfg.id + ": " + err);
     }
-    if (autoRouteAudio && !slot->inst->audioOutputs().empty()) {
-        auto& outs = slot->inst->audioOutputs();
-        uint32_t port = 0;
-        for (uint32_t i = 0; i < outs.size(); ++i)
-            if (outs[i].isMain) {
-                port = i;
-                break;
-            }
+    if (autoRouteAudio && !instrument.audioOutputs().empty()) {
+        auto& outs = instrument.audioOutputs();
+        const uint32_t port = mainPort(outs);
         uint32_t chs = outs[port].channels;
         if (chs == 1) {
             audioRoutes_.push_back({cfg.id, port, 0, 0, 1.0f});
@@ -717,43 +868,52 @@ std::string Engine::installPlugin(PluginConfig cfg, std::unique_ptr<HostedPlugin
             for (uint32_t c = 0; c < std::min<uint32_t>(chs, 2); ++c) audioRoutes_.push_back({cfg.id, port, c, c, 1.0f});
         }
     }
+    const std::string id = cfg.id;
     plugins_.push_back(std::move(slot));
     rebuildInjectionMaps();
     if (mode_ != EngineMode::Stopped) publishGraph();
-    return cfg.id;
+    return id;
 }
 
 bool Engine::reloadPlugin(const std::string& id, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
-        auto* s = findPlugin(id);
-        if (!s) {
+        PluginRef p = findAny(id);
+        if (!p) {
             error = "no such plugin: " + id;
             return;
         }
-        ok = reloadSlot(*s, error);
-        if (mode_ != EngineMode::Stopped) publishGraph();
+        ok = reloadSlot(*p.slot, error);
+        settleSlot(*p.slot);
     });
     return ok;
 }
 
 bool Engine::reloadSlot(PluginSlot& s, std::string& error) {
-    if (s.inst) {
-        if (std::vector<uint8_t> state; s.inst->saveState(state)) s.cfg.state = std::move(state);
+    if (s.chain) {
+        s.closeEditors();
+        if (HostedPlugin* instrument = s.instrument())
+            if (std::vector<uint8_t> state; instrument->saveState(state)) s.cfg.state = std::move(state);
+        for (auto& e : s.effects)
+            if (std::vector<uint8_t> state; e.inst && e.inst->saveState(state)) e.cfg.state = std::move(state);
         quiesceSlot(s);
-        s.inst.reset();
+        s.unloadEffects();
+        s.chain.reset();
     }
+    if (isMaster(s) && s.effects.empty()) return true;
     bool stateRejected = false;
-    auto inst = makePlugin(s.cfg, stateRejected, error);
-    if (!inst) {
+    auto chain = makeChain(s, stateRejected, error);
+    if (!chain) {
         s.status = error;
         return false;
     }
-    s.cfg.pluginId = inst->description().id;
-    if (s.cfg.name.empty()) s.cfg.name = inst->description().name;
-    inst->setDisplayName(s.cfg.name);
-    if (stateRejected) logWarn(s.cfg.id + ": plugin rejected the saved state");
-    s.inst = std::move(inst);
+    s.chain = std::move(chain);  // an empty master's goes in settleSlot()
+    if (HostedPlugin* instrument = s.instrument()) {
+        s.cfg.pluginId = instrument->description().id;
+        if (s.cfg.name.empty()) s.cfg.name = instrument->description().name;
+        instrument->setDisplayName(s.cfg.name);
+        if (stateRejected) logWarn(s.cfg.id + ": plugin rejected the saved state");
+    }
     s.crashReported = false;
     s.status = "loaded";
     if (mode_ != EngineMode::Stopped && !activateSlot(s, error)) return false;
@@ -763,21 +923,158 @@ bool Engine::reloadSlot(PluginSlot& s, std::string& error) {
 bool Engine::removePlugin(const std::string& id, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
-        auto it = std::find_if(plugins_.begin(), plugins_.end(), [&](auto& p) { return p->cfg.id == id; });
-        if (it == plugins_.end()) {
+        PluginRef p = findAny(id);
+        if (!p) {
             error = "no such plugin: " + id;
             return;
         }
+        PluginSlot& s = *p.slot;
+        if (p.effect) {
+            const size_t i = (size_t)(p.effect - s.effects.data());
+            quiesceSlot(s);
+            if (p.effect->inst) s.chain->remove(s.chainIndex(i));
+            s.effects.erase(s.effects.begin() + (ptrdiff_t)i);
+            resumeSlot(s);
+            ok = true;
+            return;
+        }
+        s.closeEditors();
         {
             std::unique_lock lock(injectMutex_);
             injectPlugins_.erase(id);
         }
-        quiesceSlot(**it);  // the audio thread no longer sees it after this
+        quiesceSlot(s, true);  // the audio thread no longer sees it after this
         std::erase_if(midiRoutes_, [&](auto& r) { return r.plugin == id; });
         std::erase_if(audioRoutes_, [&](auto& r) { return r.plugin == id; });
+        auto it = std::find_if(plugins_.begin(), plugins_.end(), [&](auto& x) { return x.get() == &s; });
         std::unique_ptr<PluginSlot> slot = std::move(*it);
         plugins_.erase(it);
-        slot.reset();  // closes GUI, deactivates, destroys
+        slot.reset();  // deactivates, destroys
+        ok = true;
+    });
+    if (ok) markChanged();
+    return ok;
+}
+
+// The chain is shared while its effect is prepared here: removed or loaded again meanwhile, it
+// lasts until then, and the effect fails.
+std::string Engine::addEffect(const std::string& owner, size_t index, const PluginConfig& cfgIn, std::string& error) {
+    auto ownerSlot = [&] { return owner.empty() ? master_.get() : findPlugin(owner); };
+    EffectSlot e;
+    e.cfg = cfgIn;
+    std::shared_ptr<HostedChain> chain;  // in a plugin host, while the effect is prepared here
+    bool fresh = false;                  // the master's chain, made for this effect
+    std::string id;
+    for (const HostedChain* busy = nullptr;; busy = nullptr) {
+        host_->invoke([&] {
+            PluginSlot* s = ownerSlot();
+            if (!s) {
+                error = "no such instrument: " + owner;
+                return;
+            }
+            if (!cfgIn.id.empty() && findAny(cfgIn.id)) {
+                error = "plugin id already in use: " + cfgIn.id;
+                return;
+            }
+            const std::string architecture = isMaster(*s)       ? std::string(buildArchitecture())
+                                             : s->instrument() ? s->instrument()->description().architecture
+                                                               : "";
+            if (!isMaster(*s) && !s->instrument()) {
+                error = "the instrument is not loaded: " + owner;
+                return;
+            }
+            if (const std::string a = pluginArchitecture(pathFromUtf8(cfgIn.path)); !a.empty() && a != architecture) {
+                error = cfgIn.path + " is built for " + a + ", and its chain runs as " + architecture +
+                        ": an effect must be built for its instrument's architecture (the master's: Brack's)";
+                return;
+            }
+            fresh = !s->chain;
+            if (fresh) {  // the master's first effect: activated with it, once it is in
+                bool stateRejected = false;
+                s->chain = makeChain(*s, stateRejected, error);
+                if (!s->chain) return;
+                s->crashReported = false;
+            }
+            if (s->chain->separateProcess()) {
+                std::lock_guard lock(addingMutex_);
+                if (std::find(adding_.begin(), adding_.end(), s->chain.get()) != adding_.end()) {
+                    busy = s->chain.get();
+                } else {
+                    adding_.push_back(s->chain.get());
+                    chain = s->chain;
+                }
+                return;
+            }
+            const bool prepared = prepareEffect(*s->chain, e) != nullptr;
+            id = addPreparedEffect(*s, index, std::move(e), prepared, fresh, error);
+        });
+        if (!busy) break;
+        if (host_->isCurrent()) {  // the effect being added needs this thread to finish
+            error = "another effect is loading into this chain";
+            return {};
+        }
+        std::unique_lock lock(addingMutex_);
+        addingDone_.wait(lock, [&] { return std::find(adding_.begin(), adding_.end(), busy) == adding_.end(); });
+    }
+    if (chain) {
+        const bool prepared = prepareEffect(*chain, e) != nullptr;
+        host_->invoke([&] {
+            {
+                std::lock_guard lock(addingMutex_);
+                std::erase(adding_, chain.get());
+            }
+            if (PluginSlot* s = ownerSlot(); s && s->chain == chain)
+                id = addPreparedEffect(*s, index, std::move(e), prepared, fresh, error);
+            else
+                error = "its chain was removed or loaded again while the effect loaded";
+            chain.reset();  // on this thread, should it be the last owner
+        });
+        addingDone_.notify_all();
+    }
+    if (!id.empty()) markChanged();
+    return id;
+}
+
+std::string Engine::addPreparedEffect(PluginSlot& s, size_t index, EffectSlot e, bool prepared, bool fresh,
+                                      std::string& error) {
+    std::string id;
+    const bool processed = s.chain->isActive();  // in the graph: out of it while the chain changes
+    bool insert = prepared;
+    if (!prepared) {
+        error = e.status;
+    } else if (!e.cfg.id.empty() && findAny(e.cfg.id)) {  // taken while the effect loaded
+        error = "plugin id already in use: " + e.cfg.id;
+        insert = false;
+    }
+    if (processed && insert) quiesceSlot(s);
+    if (insert) {
+        index = std::min(index, s.effects.size());
+        if (insertEffect(*s.chain, s.chainIndex(index), e)) {
+            if (e.cfg.id.empty()) e.cfg.id = uniqueId(e.cfg.name, true);
+            if (processed) e.status = e.inst->isActive() ? "ok" : "not active (see the log)";
+            id = e.cfg.id;
+            s.effects.insert(s.effects.begin() + (ptrdiff_t)index, std::move(e));
+        } else {
+            error = e.status;
+        }
+    }
+    if (std::string err; fresh && !processed && !id.empty() && mode_ != EngineMode::Stopped && !activateSlot(s, err))
+        logError("master: " + err);
+    if (processed && insert) resumeSlot(s);
+    else settleSlot(s);
+    return id;
+}
+
+bool Engine::setEffectBypass(const std::string& id, bool bypass, std::string& error) {
+    bool ok = false;
+    host_->invoke([&] {
+        PluginRef p = findAny(id);
+        if (!p || !p.effect) {
+            error = (p ? "not an effect: " : "no such plugin: ") + id;
+            return;
+        }
+        p.effect->bypass = bypass;
+        if (p.effect->inst) p.slot->chain->setBypass(p.slot->chainIndex((size_t)(p.effect - p.slot->effects.data())), bypass);
         ok = true;
     });
     if (ok) markChanged();
@@ -787,15 +1084,16 @@ bool Engine::removePlugin(const std::string& id, std::string& error) {
 bool Engine::setPluginGuiVisible(const std::string& id, bool visible, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
-        auto* s = findPlugin(id);
-        if (!s || !s->inst) {
-            error = (s ? "plugin not loaded: " : "no such plugin: ") + id;
+        PluginRef p = findAny(id);
+        HostedPlugin* inst = p ? p.inst() : nullptr;
+        if (!inst) {
+            error = (p ? "plugin not loaded: " : "no such plugin: ") + id;
             return;
         }
         if (visible) {
-            ok = s->inst->openGui(error);
+            ok = inst->openGui(error);
         } else {
-            s->inst->closeGui();
+            inst->closeGui();
             ok = true;
         }
     });
@@ -809,12 +1107,13 @@ bool Engine::showPluginGuiIn(const std::string& id, void* parent, std::string& e
     }
     bool ok = false;
     host_->invoke([&] {
-        auto* s = findPlugin(id);
-        if (!s || !s->inst) {
-            error = (s ? "plugin not loaded: " : "no such plugin: ") + id;
+        PluginRef p = findAny(id);
+        HostedPlugin* inst = p ? p.inst() : nullptr;
+        if (!inst) {
+            error = (p ? "plugin not loaded: " : "no such plugin: ") + id;
             return;
         }
-        ok = s->inst->openGui(error, parent);
+        ok = inst->openGui(error, parent);
     });
     return ok;
 }
@@ -822,16 +1121,16 @@ bool Engine::showPluginGuiIn(const std::string& id, void* parent, std::string& e
 bool Engine::getPluginState(const std::string& id, std::vector<uint8_t>& out, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
-        auto* s = findPlugin(id);
-        if (!s) {
+        PluginRef p = findAny(id);
+        if (!p) {
             error = "no such plugin: " + id;
             return;
         }
-        if (s->inst) {
-            ok = s->inst->saveState(out);
+        if (HostedPlugin* inst = p.inst()) {
+            ok = inst->saveState(out);
             if (!ok) error = "the plugin did not save its state";
-        } else if (s->cfg.state) {
-            out = *s->cfg.state;
+        } else if (p.cfg().state) {
+            out = *p.cfg().state;
             ok = true;
         } else {
             error = "the plugin is not loaded and has no state";
@@ -843,16 +1142,16 @@ bool Engine::getPluginState(const std::string& id, std::vector<uint8_t>& out, st
 bool Engine::setPluginState(const std::string& id, const std::vector<uint8_t>& state, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
-        auto* s = findPlugin(id);
-        if (!s) {
+        PluginRef p = findAny(id);
+        if (!p) {
             error = "no such plugin: " + id;
             return;
         }
-        if (s->inst) {
-            ok = s->inst->loadState(state);
+        if (HostedPlugin* inst = p.inst()) {
+            ok = inst->loadState(state);
             if (!ok) error = "the plugin rejected the state";
         } else {
-            s->cfg.state = state;
+            p.cfg().state = state;
             ok = true;
         }
     });
@@ -870,15 +1169,16 @@ bool Engine::setMasterGain(float gain) {
 bool Engine::setPluginName(const std::string& id, const std::string& name, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
-        auto* s = findPlugin(id);
-        if (!s) {
+        PluginRef p = findAny(id);
+        if (!p) {
             error = "no such plugin: " + id;
             return;
         }
+        HostedPlugin* inst = p.inst();
         std::string n = name;
-        if (n.empty()) n = s->inst ? s->inst->description().name : s->cfg.pluginId;
-        s->cfg.name = n;
-        if (s->inst) s->inst->setDisplayName(n);
+        if (n.empty()) n = inst ? inst->description().name : p.cfg().pluginId;
+        p.cfg().name = n;
+        if (inst) inst->setDisplayName(n);
         ok = true;
     });
     if (ok) markChanged();
@@ -902,8 +1202,28 @@ bool moveSlot(Slots& slots, const std::string& id, size_t index) {
 bool Engine::movePlugin(const std::string& id, size_t index, std::string& error) {
     bool ok = false;
     host_->invoke([&] {
-        ok = moveSlot(plugins_, id, index);
-        if (!ok) error = "no such plugin: " + id;
+        PluginRef p = findAny(id);
+        if (!p) {
+            error = "no such plugin: " + id;
+            return;
+        }
+        if (!p.effect) {
+            ok = moveSlot(plugins_, id, index);
+            return;
+        }
+        PluginSlot& s = *p.slot;
+        const size_t from = (size_t)(p.effect - s.effects.data());
+        const size_t to = std::min(index, s.effects.size() - 1);
+        const size_t chainFrom = s.chainIndex(from);
+        EffectSlot e = std::move(s.effects[from]);
+        s.effects.erase(s.effects.begin() + (ptrdiff_t)from);
+        s.effects.insert(s.effects.begin() + (ptrdiff_t)to, std::move(e));
+        if (s.effects[to].inst) {
+            quiesceSlot(s);
+            s.chain->move(chainFrom, s.chainIndex(to));
+            resumeSlot(s);
+        }
+        ok = true;
     });
     if (ok) markChanged();
     return ok;
@@ -922,17 +1242,11 @@ bool Engine::moveMidiSource(const std::string& id, size_t index, std::string& er
 void Engine::pluginStateChanged(HostedPlugin&) { markChanged(); }
 
 void Engine::pluginGuiClosed(HostedPlugin& inst) {
-    if (auto* s = findPlugin(inst)) pushEvent({EngineEvent::Type::EditorClosed, s->cfg.id, {}, 0, 0});
+    if (PluginRef p = findAny(inst)) pushEvent({EngineEvent::Type::EditorClosed, p.cfg().id, {}, 0, 0});
 }
 
 void Engine::pluginEditorResized(HostedPlugin& inst, uint32_t width, uint32_t height) {
-    if (auto* s = findPlugin(inst)) pushEvent({EngineEvent::Type::EditorResized, s->cfg.id, {}, width, height});
-}
-
-Engine::PluginSlot* Engine::findPlugin(const HostedPlugin& inst) const {
-    for (auto& p : plugins_)
-        if (p->inst.get() == &inst) return p.get();
-    return nullptr;
+    if (PluginRef p = findAny(inst)) pushEvent({EngineEvent::Type::EditorResized, p.cfg().id, {}, width, height});
 }
 
 // ---------------------------------------------------------------------------
@@ -955,16 +1269,27 @@ void Engine::pushEvent(EngineEvent e) {
 }
 
 void Engine::checkEvents() {
-    for (auto& p : plugins_)
-        if (p->inst && p->inst->crashed() && !p->crashReported) {
-            p->crashReported = true;
-            const std::string report = p->inst->crashReport();
-            logError(p->cfg.name + ": " + report +
-                     (p->inst->separateProcess()
-                          ? ". It stays silent until it is loaded again."
-                          : ". It is no longer called and stays silent; save the session and restart Brack to use it again."));
-            pushEvent({EngineEvent::Type::PluginCrashed, p->cfg.id, report, 0, 0});
+    for (PluginSlot* p : slots()) {
+        if (!p->chain || !p->chain->crashed()) {
+            p->crashReported = false;
+            continue;
         }
+        if (!p->crashReported) {
+            p->crashReported = true;
+            // The plugin that crashed; the chain's first if that is not known.
+            const int at = std::max(p->chain->crashedPlugin(), 0);
+            const PluginRef crashed = (size_t)at < p->chain->size() ? findAny(p->chain->plugin((size_t)at)) : PluginRef{};
+            if (!crashed) continue;
+            const std::string report = p->chain->crashReport();
+            const std::string chain = p->chain->size() > 1 ? (isMaster(*p) ? " (with the master's effects)" : " (with its chain)") : "";
+            logError(crashed.cfg().name + ": " + report +
+                     (p->chain->separateProcess()
+                          ? ". It stays silent" + chain + " until it is loaded again."
+                          : ". It is no longer called and stays silent" + chain +
+                                "; save the session and restart Brack to use it again."));
+            pushEvent({EngineEvent::Type::PluginCrashed, crashed.cfg().id, report, 0, 0});
+        }
+    }
     const bool stalled = mode_ == EngineMode::Device && clockActive_.load();
     if (stalled != stallSeen_) {
         stallSeen_ = stalled;
@@ -1006,15 +1331,15 @@ void Engine::onIdle() {
             checkMidiInputs();
         }
     }
-    for (auto& p : plugins_) {
-        if (!p->inst) continue;
-        p->inst->idle();
-        if (p->inst->restartPending() && p->inst->isActive() && mode_ != EngineMode::Stopped) {
+    for (PluginSlot* p : slots()) {
+        if (!p->chain) continue;
+        p->chain->idle();
+        if (p->chain->restartPending() && p->chain->isActive() && mode_ != EngineMode::Stopped) {
             quiesceSlot(*p);
-            p->inst->deactivate();
+            p->chain->deactivate();
             std::string err;
-            if (!activateSlot(*p, err)) logError(p->cfg.id + ": restart failed: " + err);
-            publishGraph();
+            if (!activateSlot(*p, err)) logError((isMaster(*p) ? "master" : p->cfg.id) + ": restart failed: " + err);
+            settleSlot(*p);
         }
     }
     checkEvents();
@@ -1159,7 +1484,7 @@ bool Engine::addMidiRoute(const MidiRoute& r, std::string& error) {
             error = "no such plugin: " + r.plugin;
             return;
         }
-        if (p->inst && r.notePort >= p->inst->notePorts().size()) {
+        if (p->instrument() && r.notePort >= p->instrument()->notePorts().size()) {
             error = "plugin " + r.plugin + " has no note port " + std::to_string(r.notePort);
             return;
         }
@@ -1326,30 +1651,52 @@ EngineSnapshot Engine::buildSnapshot() const {
         s.cpuLoad = cpuLoad_.load();
         s.masterGain = masterGain_.load();
         for (uint32_t c = 0; c < s.outputChannels; ++c) s.outputPeaks.push_back(peaks_[c].load());
-        for (auto& p : plugins_) {
+        // One plugin: `inst` (null if not loaded) is the chain's plugin at `index`.
+        auto plugin = [](const PluginSlot& slot, const PluginConfig& cfg, const std::string& status,
+                         const HostedPlugin* inst, size_t index) {
             EngineSnapshot::Plugin sp;
-            sp.id = p->cfg.id;
-            sp.name = p->cfg.name;
-            sp.pluginId = p->cfg.pluginId;
-            pluginFormatFromPath(pathFromUtf8(p->cfg.path), sp.format);
-            sp.path = p->cfg.path;
-            sp.status = p->status;
-            sp.loaded = p->inst != nullptr;
-            if (p->inst) {
-                sp.active = p->inst->isActive();
-                sp.hasGui = p->inst->hasGui();
-                sp.guiOpen = p->inst->isGuiOpen();
-                sp.failed = p->inst->processFailed();
-                sp.crashed = p->inst->crashed();
-                sp.architecture = p->inst->description().architecture;
-                sp.separateProcess = p->inst->separateProcess();
-                if (sp.crashed) sp.status = p->inst->crashReport();
-                sp.notePorts = p->inst->notePorts();
-                sp.audioOutputs = p->inst->audioOutputs();
-                sp.latency = p->inst->latency();
+            sp.id = cfg.id;
+            sp.name = cfg.name;
+            sp.pluginId = cfg.pluginId;
+            pluginFormatFromPath(pathFromUtf8(cfg.path), sp.format);
+            sp.path = cfg.path;
+            sp.status = status;
+            sp.loaded = inst != nullptr;
+            if (inst) {
+                sp.active = inst->isActive();
+                sp.hasGui = inst->hasGui();
+                sp.guiOpen = inst->isGuiOpen();
+                sp.failed = inst->processFailed();
+                sp.crashed = slot.chain->crashed();
+                sp.architecture = inst->description().architecture;
+                sp.separateProcess = slot.chain->separateProcess();
+                const int crashedAt = slot.chain->crashedPlugin();
+                if (sp.crashed && (crashedAt == (int)index || (crashedAt < 0 && index == 0)))
+                    sp.status = slot.chain->crashReport();
+                else if (sp.crashed)
+                    sp.status = "silent: its chain crashed";
+                sp.notePorts = inst->notePorts();
+                sp.audioOutputs = inst->audioOutputs();
+                sp.latency = inst->latency();
             }
+            return sp;
+        };
+        auto effects = [&](const PluginSlot& slot) {
+            std::vector<EngineSnapshot::Plugin> list;
+            for (size_t i = 0; i < slot.effects.size(); ++i) {
+                const EffectSlot& e = slot.effects[i];
+                EngineSnapshot::Plugin sp = plugin(slot, e.cfg, e.status, e.inst, slot.chainIndex(i));
+                sp.bypass = e.bypass;
+                list.push_back(std::move(sp));
+            }
+            return list;
+        };
+        for (auto& p : plugins_) {
+            EngineSnapshot::Plugin sp = plugin(*p, p->cfg, p->status, p->instrument(), 0);
+            sp.effects = effects(*p);
             s.plugins.push_back(std::move(sp));
         }
+        s.masterEffects = effects(*master_);
         for (auto& src : sources_) {
             EngineSnapshot::Source ss;
             ss.id = src->cfg.id;

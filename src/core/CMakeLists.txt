@@ -3,6 +3,7 @@ add_library(brack_core STATIC
   audio/resampler.cpp
   audio/audio_output.cpp
   plugin/plugin.cpp
+  plugin/chain.cpp
   plugin/plugin_files.cpp
   plugin/plugin_scan.cpp
   plugin/scan_cache.cpp
@@ -17,7 +18,7 @@ add_library(brack_core STATIC
   session.cpp
   report.cpp
   remote/host_protocol.cpp
-  remote/remote_plugin.cpp
+  remote/remote_chain.cpp
   remote/plugin_host.cpp
 )
 target_include_directories(brack_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

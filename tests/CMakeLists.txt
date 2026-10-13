@@ -52,6 +52,37 @@ if(MSVC)
   add_dependencies(brack_test_synth_vst3 brack_test_synth)
 endif()
 
+# Test effects: a gain in each format (the CLAP one stereo and mono).
+add_library(brack_test_gain MODULE test_effect/test_gain.cpp)
+target_link_libraries(brack_test_gain PRIVATE brack_dep_clap)
+set_target_properties(brack_test_gain PROPERTIES PREFIX "" SUFFIX ".clap" OUTPUT_NAME brack-test-gain)
+add_library(brack_test_gain_vst2 MODULE test_effect/test_gain_vst2.cpp)
+target_link_libraries(brack_test_gain_vst2 PRIVATE brack_dep_vst2)
+set_target_properties(brack_test_gain_vst2 PROPERTIES PREFIX "" OUTPUT_NAME brack-test-gain-vst2)
+add_library(brack_test_gain_vst3 MODULE test_effect/test_gain_vst3.cpp)
+if(WIN32)
+  target_sources(brack_test_gain_vst3 PRIVATE test_effect/test_gain_vst3.def)
+endif()
+target_link_libraries(brack_test_gain_vst3 PRIVATE brack_dep_vst3)
+set_target_properties(brack_test_gain_vst3 PROPERTIES PREFIX "" SUFFIX ".vst3" OUTPUT_NAME brack-test-gain)
+if(APPLE)
+  set_target_properties(brack_test_gain PROPERTIES BUNDLE TRUE BUNDLE_EXTENSION clap SUFFIX "")
+  set_target_properties(brack_test_gain_vst2 PROPERTIES BUNDLE TRUE BUNDLE_EXTENSION vst)
+  set_target_properties(brack_test_gain_vst3 PROPERTIES BUNDLE TRUE BUNDLE_EXTENSION vst3 SUFFIX "")
+  set(BRACK_TEST_GAIN "$<TARGET_BUNDLE_DIR:brack_test_gain>")
+  set(BRACK_TEST_GAIN_VST2 "$<TARGET_BUNDLE_DIR:brack_test_gain_vst2>")
+  set(BRACK_TEST_GAIN_VST3 "$<TARGET_BUNDLE_DIR:brack_test_gain_vst3>")
+else()
+  set(BRACK_TEST_GAIN "$<TARGET_FILE:brack_test_gain>")
+  set(BRACK_TEST_GAIN_VST2 "$<TARGET_FILE:brack_test_gain_vst2>")
+  set(BRACK_TEST_GAIN_VST3 "$<TARGET_FILE:brack_test_gain_vst3>")
+endif()
+if(MSVC)
+  set_target_properties(brack_test_gain_vst3 PROPERTIES PDB_NAME brack-test-gain-vst3)
+  target_link_options(brack_test_gain_vst3 PRIVATE /INCREMENTAL:NO)
+  add_dependencies(brack_test_gain_vst3 brack_test_gain)
+endif()
+
 add_executable(test_resampler test_resampler.cpp)
 target_link_libraries(test_resampler PRIVATE brack_core)
 add_test(NAME resampler COMMAND test_resampler)
@@ -90,14 +121,14 @@ endif()
 
 add_executable(test_engine test_engine.cpp)
 target_link_libraries(test_engine PRIVATE brack_core)
-add_dependencies(test_engine brack_host brack_test_synth)
-add_test(NAME engine COMMAND test_engine ${BRACK_TEST_SYNTH})
+add_dependencies(test_engine brack_host brack_test_synth brack_test_gain brack_test_gain_vst2 brack_test_gain_vst3)
+add_test(NAME engine COMMAND test_engine ${BRACK_TEST_SYNTH} ${BRACK_TEST_GAIN} ${BRACK_TEST_GAIN_VST2} ${BRACK_TEST_GAIN_VST3})
 
 # What the guard around calls into plugins catches: SEH on Windows, signals elsewhere.
 add_executable(test_crash test_crash.cpp)
 target_link_libraries(test_crash PRIVATE brack_core)
-add_dependencies(test_crash brack_host brack_test_synth brack_test_synth_vst3)
-add_test(NAME crash COMMAND test_crash ${BRACK_TEST_SYNTH} ${BRACK_TEST_SYNTH_VST3})
+add_dependencies(test_crash brack_host brack_test_synth brack_test_synth_vst3 brack_test_gain)
+add_test(NAME crash COMMAND test_crash ${BRACK_TEST_SYNTH} ${BRACK_TEST_SYNTH_VST3} ${BRACK_TEST_GAIN})
 
 # VST2 and VST3 end to end; makes a VST3 bundle and fakes other architectures' plugins.
 add_executable(test_formats test_formats.cpp)
@@ -117,13 +148,13 @@ if(X11_FOUND AND NOT WIN32 AND NOT APPLE)
   target_compile_definitions(test_isolation PRIVATE BRACK_TEST_X11)
   target_link_libraries(test_isolation PRIVATE X11::X11)
 endif()
-add_dependencies(test_isolation brack_host brack_test_synth brack_test_synth_vst2 brack_test_synth_vst3)
+add_dependencies(test_isolation brack_host brack_test_synth brack_test_synth_vst2 brack_test_synth_vst3 brack_test_gain)
 set(_other_synths)
 foreach(_bin IN LISTS BRACK_OTHER_ARCH_BINS)
   list(APPEND _other_synths "${_bin}/brack-test-synth.clap")
 endforeach()
 add_test(NAME isolation COMMAND test_isolation ${BRACK_TEST_SYNTH} ${BRACK_TEST_SYNTH_VST2}
-                                ${BRACK_TEST_SYNTH_VST3} ${_other_synths})
+                                ${BRACK_TEST_SYNTH_VST3} ${BRACK_TEST_GAIN} ${_other_synths})
 
 # Exercises brack.dll (libbrack.so) through its public C header only.
 add_executable(test_dll test_dll.c)
@@ -131,13 +162,13 @@ target_link_libraries(test_dll PRIVATE brack)
 if(APPLE)
   target_link_libraries(test_dll PRIVATE "-framework CoreFoundation")
 endif()
-add_dependencies(test_dll brack_host brack_test_synth brack_test_synth_vst2 brack_test_synth_vst3)
+add_dependencies(test_dll brack_host brack_test_synth brack_test_synth_vst2 brack_test_synth_vst3 brack_test_gain)
 add_test(NAME dll COMMAND test_dll ${BRACK_TEST_SYNTH} ${BRACK_TEST_SYNTH_VST2} ${BRACK_TEST_SYNTH_VST3}
-                          ${BRACK_TEST_OTHER_BINS})
+                          ${BRACK_TEST_GAIN} ${BRACK_TEST_OTHER_BINS})
 # A universal build's x64 half too, through Rosetta 2.
 if(BRACK_UNIVERSAL AND EXISTS "/Library/Apple/usr/libexec/oah/libRosettaRuntime")
   add_test(NAME dll_x64 COMMAND arch -x86_64 $<TARGET_FILE:test_dll> ${BRACK_TEST_SYNTH} ${BRACK_TEST_SYNTH_VST2}
-                                ${BRACK_TEST_SYNTH_VST3} ${BRACK_TEST_OTHER_BINS})
+                                ${BRACK_TEST_SYNTH_VST3} ${BRACK_TEST_GAIN} ${BRACK_TEST_OTHER_BINS})
 endif()
 
 # The per-OS plugin file rules and UTF-16 text, for every OS.
@@ -165,7 +196,7 @@ endif()
 if(BRACK_DOTNET AND (BRACK_DOTNET_ARCH STREQUAL BRACK_ARCH OR BRACK_UNIVERSAL))
   add_test(NAME dotnet
            COMMAND ${BRACK_DOTNET} run --project ${CMAKE_SOURCE_DIR}/bindings/dotnet/Brack.Tests -c Release
-                   -- $<TARGET_FILE:brack> ${BRACK_TEST_SYNTH})
+                   -- $<TARGET_FILE:brack> ${BRACK_TEST_SYNTH} ${BRACK_TEST_GAIN})
   set_tests_properties(dotnet PROPERTIES TIMEOUT 600)
 endif()
 

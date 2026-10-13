@@ -24,6 +24,8 @@ const std::map<std::string, std::vector<std::string>> kOffered = {
     {"addPlugin", {"brack_add_plugin", "brack_add_plugin_ex"}},
     {"removePlugin", {"brack_remove_plugin"}},
     {"reloadPlugin", {"brack_reload_plugin"}},
+    {"addEffect", {"brack_add_effect"}},
+    {"setEffectBypass", {"brack_set_effect_bypass"}},
     {"setPluginGuiVisible", {"brack_show_plugin_gui"}},
     {"showPluginGuiIn", {"brack_show_plugin_gui_in"}},
     {"getPluginState", {"brack_get_plugin_state"}},
@@ -50,6 +52,7 @@ const std::map<std::string, std::vector<std::string>> kOffered = {
     {"loadSessionJson", {"brack_load_session_json"}},
     {"saveSessionFile", {"brack_save_session"}},
     {"loadSessionFile", {"brack_load_session"}},
+    {"describeSessionFile", {"brack_describe_session"}},
     {"clear", {"brack_clear"}},
     {"snapshot", {"brack_get_status"}},
     {"cachedSnapshot", {"brack_get_status_cached"}},
@@ -65,7 +68,7 @@ const std::map<std::string, std::string> kNotOffered = {
 
 // C functions that are not about an engine method.
 const std::set<std::string> kStandalone = {
-    "brack_api_version",     "brack_version_string",       "brack_last_error",
+    "brack_api_version",     "brack_version_string",       "brack_architecture",  "brack_last_error",
     "brack_set_log_callback", "brack_engine_create",       "brack_engine_destroy",
     "brack_list_audio_devices",   "brack_list_midi_inputs",
     "brack_virtual_midi_available", "brack_virtual_midi_removal_hangs",

@@ -72,6 +72,7 @@ std::string play(const std::string& path, PluginFormat format, float& fullPeak) 
     CHECK(p.active && !p.failed);
     CHECK(p.notePorts.size() == 1);
     CHECK(p.audioOutputs.size() == 1 && p.audioOutputs[0].channels == 2);
+    CHECK(!p.hasGui);  // neither synth has an editor, though the VST3 one has a controller
     CHECK(e.addMidiSource({"keys", MidiSourceKind::Api, ""}, err) == "keys");
     CHECK(e.addMidiRoute({"keys", "synth", 0}, err));
 

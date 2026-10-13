@@ -41,7 +41,8 @@ engine.SendMidi(synth, 0, [0x80, 60, 0]);                // note off
 To render the audio yourself rather than play it, call `StartManual(sampleRate, channels, maxFrames)` instead
 of `Start()`, then `Render(outputs, frames)` from your audio callback. `BrackLibrary.ScanPlugins()` lists the
 installed plugins, `BrackLibrary.ListAudioDevices()` and `BrackLibrary.ListMidiInputs()` what the system offers, and
-`SaveSession()` / `LoadSession()` keep a whole rack in a file.
+`SaveSession()` / `LoadSession()` keep a whole rack in a file. `AddEffect(synth, 0, "/path/to/Reverb.clap")` puts
+an effect on an instrument's output, and `AddEffect(null, 0, ...)` one on the mix of every instrument.
 
 ## Threads
 

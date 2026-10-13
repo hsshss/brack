@@ -934,7 +934,12 @@ public:
         return true;
     }
 
-    bool pluginHasGui() const override { return controller_ != nullptr; }
+    // A controller need not have an editor: only a view made and released here tells.
+    bool pluginHasGui() const override {
+        if (!controller_) return false;
+        IPtr<IPlugView> view = owned(controller_->createView(ViewType::kEditor));
+        return view && view->isPlatformTypeSupported(vst3PlatformType()) == kResultTrue;
+    }
     uint32_t pluginLatency() const override { return processorLatency_; }
 
     // ---- IComponentHandler ----
@@ -993,12 +998,13 @@ private:
             return false;
         }
         for (size_t i = 0; i < audioOuts_.size(); ++i) component_->activateBus(kAudio, kOutput, (int32)i, true);
+        for (size_t i = 0; i < audioIns_.size(); ++i)
+            if (audioIns_[i].isMain) component_->activateBus(kAudio, kInput, (int32)i, true);
         for (size_t i = 0; i < notePorts_.size(); ++i) component_->activateBus(kEvent, kInput, (int32)i, true);
 
         inBufs_.assign(audioIns_.size(), AudioBusBuffers{});
         for (size_t i = 0; i < inBufs_.size(); ++i) {
             inBufs_[i].numChannels = (int32)audioIns_[i].channels;
-            inBufs_[i].silenceFlags = ~0ull;
             inBufs_[i].channelBuffers32 = inPtrs_[i].empty() ? nullptr : inPtrs_[i].data();
         }
         outBufs_.assign(audioOuts_.size(), AudioBusBuffers{});
@@ -1158,6 +1164,7 @@ private:
         context_.projectTimeSamples = (TSamples)steadyTime;
         context_.continousTimeSamples = (TSamples)steadyTime;
         data_.numSamples = (int32)frames;
+        for (size_t i = 0; i < inBufs_.size(); ++i) inBufs_[i].silenceFlags = inputSilent(i) ? ~0ull : 0;
         for (auto& b : outBufs_) b.silenceFlags = 0;
         processor_->process(data_);
         // A channel flagged silent need not have been written: make it silent.

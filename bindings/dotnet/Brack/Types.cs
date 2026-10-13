@@ -57,7 +57,7 @@ public enum BrackEventType
     Changed = 1,
     /// <summary>Id: the plugin. Message: where it crashed.</summary>
     PluginCrashed = 2,
-    /// <summary>Id: the plugin whose editor closed.</summary>
+    /// <summary>Id: the plugin whose editor closed, whatever closed it.</summary>
     EditorClosed = 3,
     /// <summary>Id: the plugin. Width and height: its editor's size, in physical pixels.</summary>
     EditorResized = 4,

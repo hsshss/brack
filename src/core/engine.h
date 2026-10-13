@@ -1,6 +1,7 @@
 #pragma once
-// The brack engine: hosts CLAP / VST3 / VST2 instruments, routes MIDI sources to plugin note
-// ports and plugin audio outputs to output channels, renders at an internal
+// The brack engine: hosts CLAP / VST3 / VST2 instruments, each with a chain of effects on its main
+// output (plugin/chain.h), routes MIDI sources to plugin note ports and plugin audio outputs to
+// output channels, runs the mix through the master's chain of effects, renders at an internal
 // processing rate and converts to the device rate with a high quality SRC.
 //
 // Threads:
@@ -11,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -26,7 +28,7 @@
 
 #include "audio/audio_output.h"
 #include "audio/resampler.h"
-#include "plugin/plugin.h"
+#include "plugin/chain.h"
 #include "util/arrival_clock.h"
 #include "util/callback_cadence.h"
 #include "util/frame_map.h"
@@ -94,7 +96,7 @@ struct EngineEvent {
     enum class Type {
         Changed,                // what a session saves changed (see changeCount()); at most one queued
         PluginCrashed,          // id: the plugin; message: where it crashed
-        EditorClosed,           // id: the plugin whose editor closed (by the user or a call)
+        EditorClosed,           // id: the plugin whose editor closed, whatever closed it
         EditorResized,          // id: the plugin; width/height: its editor's new size, physical pixels
         DeviceStalled,          // the output device stopped calling back (see EngineSnapshot::deviceStalled)
         DeviceResumed,          // and is back
@@ -124,12 +126,16 @@ struct EngineSnapshot {
         std::string id, name, pluginId, path, status;
         PluginFormat format = PluginFormat::Clap;
         bool loaded = false, active = false, hasGui = false, guiOpen = false, failed = false;
-        bool crashed = false;  // the plugin crashed and is no longer called (status says where)
+        // The plugin's chain crashed and is no longer called (the status of the plugin that
+        // crashed says where).
+        bool crashed = false;
         std::string architecture;      // of its binary: "x64", "x86", ... (empty if not loaded)
-        bool separateProcess = false;  // runs in a plugin host process of its own
+        bool separateProcess = false;  // runs in a plugin host process (with its chain)
         std::vector<NotePortInfo> notePorts;
         std::vector<AudioPortInfo> audioOutputs;
         uint32_t latency = 0;
+        bool bypass = false;          // an effect's
+        std::vector<Plugin> effects;  // an instrument's chain, in order
     };
     struct Source {
         std::string id, name, status;
@@ -138,6 +144,7 @@ struct EngineSnapshot {
         uint64_t messages = 0, dropped = 0;
     };
     std::vector<Plugin> plugins;
+    std::vector<Plugin> masterEffects;
     std::vector<Source> sources;
     std::vector<MidiRoute> midiRoutes;
     std::vector<AudioRoute> audioRoutes;
@@ -166,11 +173,23 @@ public:
     static constexpr size_t kMaxGeneratedId = 63;
     // Returns the instance id (generated if cfg.id is empty), or empty on error.
     std::string addPlugin(const PluginConfig& cfg, bool autoRouteAudio, std::string& error);
+    // An instrument goes with its effects.
     bool removePlugin(const std::string& id, std::string& error);
-    // Loads the plugin again as a new instance, with the state a session would save for it, keeping
-    // its id, name and routes: for a plugin that crashed or failed to load. A plugin that crashed
-    // in this process cannot load again until Brack restarts; one from a plugin host process can.
+    // Loads the plugin's chain again as new instances, with the states a session would save for
+    // them, keeping their ids, names and routes: for a chain that crashed or a plugin that failed
+    // to load. A plugin that crashed in this process cannot load again until Brack restarts; one
+    // from a plugin host process can.
     bool reloadPlugin(const std::string& id, std::string& error);
+    // Adds an effect to the chain of the instrument `owner`, or of the master if it is empty, at
+    // `index` among its effects (clamped). It must be built for the instrument's architecture
+    // (the master's: Brack's). Returns its id, generated if cfg.id is empty, unique among every
+    // plugin's; or empty on error. The methods that take a plugin id take an effect's too, but
+    // for routing and MIDI; moving it moves it among its chain's effects. For a chain in a plugin
+    // host the effect loads on the calling thread; it fails if the chain is removed or loaded
+    // again meanwhile.
+    std::string addEffect(const std::string& owner, size_t index, const PluginConfig& cfg, std::string& error);
+    // A bypassed effect is not processed: what comes to it goes on unchanged.
+    bool setEffectBypass(const std::string& id, bool bypass, std::string& error);
     bool setPluginGuiVisible(const std::string& id, bool visible, std::string& error);
     // Opens the editor as a child of `parent`, a window of the caller's (of the kind
     // HostWindow::nativeHandle() describes), at its top left; EngineEvent::EditorResized reports
@@ -234,6 +253,8 @@ public:
     // if that fails the load still succeeds and the engine is left stopped (logged).
     bool loadSessionJson(const std::string& json, std::string& error);
     bool saveSessionFile(const std::string& pathUtf8, std::string& error);
+    // brack_describe_session's JSON; any thread, no engine. False, with `error`, if unreadable.
+    static bool describeSessionFile(const std::string& pathUtf8, std::string& out, std::string& error);
     bool loadSessionFile(const std::string& pathUtf8, std::string& error);
     void clear();
 
@@ -265,6 +286,7 @@ public:
                                                       bool standardLocations = true);
 
     struct PluginSlot;
+    struct EffectSlot;
     struct SourceSlot;
     struct RtGraph;
 
@@ -285,30 +307,82 @@ private:
     bool startRunning(Timeline t, EngineMode mode, uint32_t outRate, uint32_t channels, uint32_t maxOutFrames,
                       std::string& error);
     bool activateSlot(PluginSlot& s, std::string& error);
-    // Every loaded plugin: those in plugin hosts at once, each host answering on its own; those in
+    // Every loaded chain: those in plugin hosts at once, each host answering on its own; those in
     // this process one after another on this thread, as their formats require.
     void activateSlots();
-    void quiesceSlot(PluginSlot& s);  // stop processing + remove from graph
-    void publishGraph(const PluginSlot* exclude = nullptr);
+    // Stops the slot's chain and takes it out of processing. Its MIDI waits until settleSlot(),
+    // unless `removing`: then the slot leaves the graph.
+    void quiesceSlot(PluginSlot& s, bool removing = false);
+    void resumeSlot(PluginSlot& s);  // after quiesceSlot(): processing again, and settleSlot()
+    // After the slot's chain changed or was made: into the graph, its MIDI passed on again; the
+    // master's goes once empty.
+    void settleSlot(PluginSlot& s);
+    void publishGraph();
     void onIdle();
-    std::string uniqueId(const std::string& base, bool plugin) const;
+    // An id from `base` that no plugin (`plugin`) or MIDI source has, nor `adding`, a slot not yet
+    // in the rack.
+    std::string uniqueId(const std::string& base, bool plugin, const PluginSlot* adding = nullptr) const;
+    // Before a slot goes in the rack (or the master's, its effects set): an id for each plugin
+    // without one, and a new one, with a warning, for an effect whose id is taken (an effect's id is
+    // in no route; a taken instrument id is the caller's to refuse).
+    void assignIds(PluginSlot& s) const;
+    // An instrument's slot.
     PluginSlot* findPlugin(const std::string& id) const;
+    // Any plugin by id: an instrument (`effect` null) or an effect of `slot`'s chain.
+    struct PluginRef {
+        PluginSlot* slot = nullptr;
+        EffectSlot* effect = nullptr;
+        explicit operator bool() const { return slot != nullptr; }
+        PluginConfig& cfg() const;
+        HostedPlugin* inst() const;  // null while it is not loaded
+    };
+    PluginRef findAny(const std::string& id) const;
+    PluginRef findAny(const HostedPlugin& inst) const;
+    // The instruments' slots, then the master's, without allocating. The rack must not change
+    // while it is walked.
+    struct SlotRange {
+        const std::vector<std::unique_ptr<PluginSlot>>& plugins;
+        PluginSlot* master;
+        struct Iterator {
+            const SlotRange* range;
+            size_t i;
+            PluginSlot* operator*() const { return i < range->plugins.size() ? range->plugins[i].get() : range->master; }
+            Iterator& operator++() {
+                ++i;
+                return *this;
+            }
+            bool operator!=(const Iterator& o) const { return i != o.i; }
+        };
+        Iterator begin() const { return {this, 0}; }
+        Iterator end() const { return {this, plugins.size() + (master ? 1 : 0)}; }
+    };
+    SlotRange slots() const { return {plugins_, master_.get()}; }
+    bool isMaster(const PluginSlot& s) const { return &s == master_.get(); }
     SourceSlot* findSource(const std::string& id) const;
     void openSourcePort(SourceSlot& s, bool quiet = false);
-    // A plugin made and given cfg's saved state (`stateRejected`: it would not take it), not yet
-    // in the rack. In this process or a plugin host process, as the configuration and the binary
-    // say: one in a plugin host is made on the calling thread, any thread; one in this process,
-    // on the host thread. Null, with `error`, on failure.
-    std::unique_ptr<HostedPlugin> makePlugin(const PluginConfig& cfg, bool& stateRejected, std::string& error);
-    // Host thread: puts a plugin from makePlugin() in the rack. Its id, or empty with `error`.
-    std::string installPlugin(PluginConfig cfg, std::unique_ptr<HostedPlugin> inst, bool stateRejected,
-                              bool autoRouteAudio, std::string& error);
+    // The slot's chain, with its instrument (none for the master) given cfg's saved state
+    // (`stateRejected`: it would not take it), and its effects with theirs (an effect that does
+    // not load is left out, its slot saying why). In this process or a plugin host process, as the
+    // configuration and the instrument's binary say: one in a plugin host is made on the calling
+    // thread, any thread; one in this process, on the host thread. Null, with `error`, if the
+    // instrument does not load (or the master's plugin host does not start).
+    std::unique_ptr<HostedChain> makeChain(PluginSlot& s, bool& stateRejected, std::string& error);
+    // An effect from its slot, in two steps (HostedChain::prepareEffect()): made for `chain`, with
+    // its state and name, while the chain may be processed; then put in it at `index`, while it is
+    // not. Each fails (null, false) with the slot's status saying why.
+    HostedPlugin* prepareEffect(HostedChain& chain, EffectSlot& e);
+    bool insertEffect(HostedChain& chain, size_t index, EffectSlot& e);
+    // addEffect()'s insert step (host thread). `fresh`: the master's chain was made for `e`.
+    std::string addPreparedEffect(PluginSlot& s, size_t index, EffectSlot e, bool prepared, bool fresh,
+                                  std::string& error);
+    // Host thread: puts a slot with a chain from makeChain() in the rack. Its id, or empty with `error`.
+    std::string installPlugin(std::unique_ptr<PluginSlot> slot, bool stateRejected, bool autoRouteAudio,
+                              std::string& error);
     bool reloadSlot(PluginSlot& s, std::string& error);
     // About once a second: notice hardware inputs whose connection was closed, and reopen
     // hardware inputs that failed once their port is listed again.
     void checkMidiInputs();
     void rebuildInjectionMaps();
-    PluginSlot* findPlugin(const HostedPlugin& inst) const;
     void pushEvent(EngineEvent e);  // host thread
     void checkEvents();             // host thread, every idle pass
     EngineSnapshot buildSnapshot() const;
@@ -342,9 +416,14 @@ private:
     EngineMode mode_ = EngineMode::Stopped;
     AudioOutput device_;
     std::vector<std::unique_ptr<PluginSlot>> plugins_;
+    std::unique_ptr<PluginSlot> master_;  // no instrument; a chain while it has effects
     std::vector<std::unique_ptr<SourceSlot>> sources_;
     std::vector<MidiRoute> midiRoutes_;
     std::vector<AudioRoute> audioRoutes_;
+    // Chains an addEffect() prepares an effect for off the host thread: one at a time per chain.
+    std::mutex addingMutex_;
+    std::condition_variable addingDone_;
+    std::vector<const HostedChain*> adding_;
     uint32_t outRate_ = 0, procRate_ = 0, outChannels_ = 0, periodFrames_ = 0;
 
     // injection lookup (shared lock for senders, exclusive on host-thread changes); looked up by
@@ -380,6 +459,7 @@ private:
     std::vector<std::vector<float>> mix_;
     std::vector<float*> mixPtrs_;
     std::vector<uint8_t> scratch_;
+    InputEventList noEvents_{1, 0};  // the master's
     uint32_t blockSize_ = 256;
     uint64_t steadyTime_ = 0;                 // process frames since the start
     std::atomic<uint64_t> renderPos_{0};      // output frames since the start (renderPosition())

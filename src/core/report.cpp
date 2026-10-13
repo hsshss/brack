@@ -31,33 +31,50 @@ std::string snapshotToJson(const EngineSnapshot& s) {
     j["masterGain"] = s.masterGain;
     j["cpuLoad"] = s.cpuLoad;
     j["outputPeaks"] = s.outputPeaks;
-    json plugins = json::array();
-    for (auto& p : s.plugins) {
+    auto plugin = [](const EngineSnapshot::Plugin& p) {
         json np = json::array(), ao = json::array();
         for (auto& n : p.notePorts)
             np.push_back({{"name", n.name},
                           {"midi", (n.dialects & CLAP_NOTE_DIALECT_MIDI) != 0},
                           {"clap", (n.dialects & CLAP_NOTE_DIALECT_CLAP) != 0}});
         for (auto& a : p.audioOutputs) ao.push_back({{"name", a.name}, {"channels", a.channels}, {"main", a.isMain}});
-        plugins.push_back({{"id", p.id},
-                           {"name", p.name},
-                           {"format", pluginFormatName(p.format)},
-                           {"pluginId", p.pluginId},
-                           {"path", p.path},
-                           {"status", p.status},
-                           {"loaded", p.loaded},
-                           {"active", p.active},
-                           {"failed", p.failed},
-                           {"crashed", p.crashed},
-                           {"architecture", p.architecture},
-                           {"separateProcess", p.separateProcess},
-                           {"hasGui", p.hasGui},
-                           {"guiOpen", p.guiOpen},
-                           {"latency", p.latency},
-                           {"notePorts", np},
-                           {"audioOutputs", ao}});
+        return json{{"id", p.id},
+                    {"name", p.name},
+                    {"format", pluginFormatName(p.format)},
+                    {"pluginId", p.pluginId},
+                    {"path", p.path},
+                    {"status", p.status},
+                    {"loaded", p.loaded},
+                    {"active", p.active},
+                    {"failed", p.failed},
+                    {"crashed", p.crashed},
+                    {"architecture", p.architecture},
+                    {"separateProcess", p.separateProcess},
+                    {"hasGui", p.hasGui},
+                    {"guiOpen", p.guiOpen},
+                    {"latency", p.latency},
+                    {"notePorts", np},
+                    {"audioOutputs", ao}};
+    };
+    auto effects = [&](const std::vector<EngineSnapshot::Plugin>& list) {
+        json a = json::array();
+        for (auto& e : list) {
+            json je = plugin(e);
+            je["bypass"] = e.bypass;
+            je["effects"] = json::array();
+            a.push_back(je);
+        }
+        return a;
+    };
+    json plugins = json::array();
+    for (auto& p : s.plugins) {
+        json jp = plugin(p);
+        jp["bypass"] = false;
+        jp["effects"] = effects(p.effects);
+        plugins.push_back(jp);
     }
     j["plugins"] = plugins;
+    j["masterEffects"] = effects(s.masterEffects);
     json sources = json::array();
     for (auto& src : s.sources)
         sources.push_back({{"id", src.id},

@@ -1,16 +1,20 @@
 #pragma once
-// How Brack talks to a plugin host process (brack-host-<arch>.exe), which runs one plugin
-// instance, or describes plugin files for a scan, so that a plugin that crashes or hangs takes
-// only that process down, and a plugin built for another architecture than Brack's can run.
+// How Brack talks to a plugin host process (brack-host-<arch>.exe), which runs one chain
+// (plugin/chain.h), or describes plugin files for a scan, so that a plugin that crashes or hangs
+// takes only that process down, and a plugin built for another architecture than Brack's can run.
+// Requests about one plugin of the chain name it by its index there ("plugin"), or as the effect
+// prepared to go in it ("prepared").
 //
 //   pipe           CBOR messages, each a 32-bit little-endian length and the bytes. Brack
 //                  sends a request and waits for its reply; the host also sends notes at any
-//                  time (a log line, the editor closed or resized, a restart wanted).
+//                  time (a log line, an editor closed or resized, a restart wanted, which plugins
+//                  failed to process).
 //   control block  shared memory Brack creates with the process: one block's MIDI in, the
-//                  result out, a count of the plugin's state changes, and the record of a
+//                  result out, a count of the plugins' state changes, and the record of a
 //                  crash, which the host writes just before it ends itself.
-//   outputs        shared memory the host creates at each activation: the plugin's output
-//                  channels, maxFrames samples each, port by port.
+//   channels       shared memory the host creates at each activation, maxFrames samples a
+//                  channel: the master's bus in (none for a chain with an instrument), then the
+//                  chain's output channels, port by port.
 //   process, done  from Brack, and from the host when it has processed the block: two events on
 //                  Windows; elsewhere the control block's `turn`, waited on with a futex.
 //
@@ -29,7 +33,7 @@ namespace brack::remote {
 
 // Raised whenever a message or a shared layout changes: a host from another build refuses to
 // start (exit code kExitWrongVersion) rather than misread them.
-constexpr uint32_t kProtocolVersion = 1;
+constexpr uint32_t kProtocolVersion = 2;
 
 constexpr int kExitBadArguments = 100;
 constexpr int kExitWrongVersion = 101;
@@ -45,7 +49,7 @@ enum class BlockCommand : uint32_t {
 
 enum class BlockResult : uint32_t {
     Audio = 1,    // the outputs hold `frames` new frames
-    Failed = 2,   // the plugin failed to start or to process, and is not called again
+    Failed = 2,   // the instrument failed to start or to process, or a plugin crashed: not called again
     Stopped = 3,  // answer to Stop
 };
 
@@ -73,13 +77,15 @@ struct ControlBlock {
     uint32_t eventCount;
     // host -> Brack, before "done"
     uint32_t result;
-    // Goes up whenever the plugin says its state changed, from any of its threads (atomically:
+    // Goes up whenever a plugin says its state changed, from any of its threads (atomically:
     // std::atomic_ref). Brack looks after each block and each request.
     uint32_t stateChanges;
     // Written by the host before it ends itself after a crash. crashCode is the exception code,
-    // or 0 if only crashReport says what happened.
+    // or 0 if only crashReport says what happened; crashedPlugin is 1 + the index of the plugin
+    // that crashed, or 0 if that is not known.
     uint32_t crashed;
     uint32_t crashCode;
+    uint32_t crashedPlugin;
     char crashReport[1024];
     MidiEvent events[kMaxEvents];
     uint8_t sysex[kSysexBytes];

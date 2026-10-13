@@ -64,7 +64,7 @@
 extern "C" {
 #endif
 
-#define BRACK_API_VERSION 1
+#define BRACK_API_VERSION 2
 
 enum {
     BRACK_OK = 0,
@@ -116,6 +116,8 @@ typedef struct brack_config {
 
 BRACK_API uint32_t BRACK_CALL brack_api_version(void);
 BRACK_API const char* BRACK_CALL brack_version_string(void);
+/* The architecture this library is built for ("x64", "x86", "arm64"), and so the master's effects. */
+BRACK_API const char* BRACK_CALL brack_architecture(void);
 /* Last error message of the calling thread ("" if none). Valid until the next call on this thread. */
 BRACK_API const char* BRACK_CALL brack_last_error(void);
 /* Global log callback (any thread). NULL restores logging to stderr. */
@@ -203,6 +205,24 @@ BRACK_API int BRACK_CALL brack_get_plugin_state(brack_engine* e, const char* plu
 BRACK_API int BRACK_CALL brack_set_plugin_state(brack_engine* e, const char* plugin_id, const uint8_t* data,
                                                 size_t size);
 
+/* ---- effects ----
+ * Each instrument (a plugin brack_add_plugin added) has a chain of effects on its main output,
+ * processed one after another in the instrument's process; the master has one on the mix of every
+ * instrument, before the SRC and the master gain. An effect must be built for its instrument's
+ * architecture (the master's: brack.dll's). An effect is a plugin to the functions above (editor,
+ * name, state; removing it; reloading reloads its chain; moving moves it among its chain's
+ * effects), but takes no MIDI and has no audio routes. When a plugin of a chain crashes, the chain
+ * is silent until it is reloaded. An effect for a chain in a plugin host loads on the calling
+ * thread while other calls go on; it fails if its chain is removed or reloaded meanwhile.
+ * owner_id: the instrument; NULL or "" for the master. index: among the chain's effects (clamped).
+ * id, plugin_path, plugin_id, id_out, id_out_size: as for brack_add_plugin. */
+BRACK_API int BRACK_CALL brack_add_effect(brack_engine* e, const char* owner_id, uint32_t index, const char* id,
+                                          const char* plugin_path, const char* plugin_id, char* id_out,
+                                          size_t id_out_size);
+/* A bypassed effect (bypass != 0) is not processed: what comes to it goes on unchanged. Saved in
+ * sessions. */
+BRACK_API int BRACK_CALL brack_set_effect_bypass(brack_engine* e, const char* effect_id, int bypass);
+
 /* ---- MIDI sources ---- */
 BRACK_API int BRACK_CALL brack_add_midi_source(brack_engine* e, const char* id, int kind, const char* name,
                                                char* id_out, size_t id_out_size);
@@ -268,6 +288,10 @@ BRACK_API int BRACK_CALL brack_load_session(brack_engine* e, const char* path);
 BRACK_API int BRACK_CALL brack_save_session(brack_engine* e, const char* path);
 BRACK_API int BRACK_CALL brack_load_session_json(brack_engine* e, const char* json);
 BRACK_API int BRACK_CALL brack_save_session_json(brack_engine* e, char* buf, size_t size, size_t* needed);
+/* The session file's "plugins" and "masterEffects" as brack_get_status lists them, read without
+ * loading it or any engine: "id", "name" ("" if the file has none), "format", "path",
+ * "pluginId", "bypass" and "effects". */
+BRACK_API int BRACK_CALL brack_describe_session(const char* path, char* buf, size_t size, size_t* needed);
 /* Removes every plugin, MIDI source and route. The configuration and master gain stay. */
 BRACK_API int BRACK_CALL brack_clear(brack_engine* e);
 /* Goes up whenever what a session saves changes: the rack, routing, configuration, master gain,
@@ -281,7 +305,7 @@ BRACK_API uint64_t BRACK_CALL brack_change_count(brack_engine* e);
 enum brack_event_type {
     BRACK_EVENT_CHANGED = 1,                  /* brack_change_count went up; at most one queued */
     BRACK_EVENT_PLUGIN_CRASHED = 2,           /* id: the plugin, message: where it crashed */
-    BRACK_EVENT_EDITOR_CLOSED = 3,            /* id: the plugin whose editor closed */
+    BRACK_EVENT_EDITOR_CLOSED = 3,            /* id: the plugin whose editor closed, whatever closed it */
     BRACK_EVENT_EDITOR_RESIZED = 4,           /* id: the plugin; width/height: editor size, physical pixels */
     BRACK_EVENT_DEVICE_STALLED = 5,           /* the output device stopped calling back */
     BRACK_EVENT_DEVICE_RESUMED = 6,           /* and is back */
@@ -304,8 +328,9 @@ BRACK_API int BRACK_CALL brack_set_event_notify(brack_engine* e, brack_event_not
 
 /* ---- inspection (JSON) ----
  * brack_get_status: engine state, plugins (with note/audio ports, and the architecture they run
- * as and whether in a plugin host process), sources, routes. Waits for Brack's thread, which
- * may be busy (loading a plugin, say).
+ * as and whether in a plugin host process; each instrument with its "effects"), the master's
+ * "masterEffects", sources, routes. Waits for Brack's thread, which may be busy (loading a plugin,
+ * say).
  * brack_get_status_cached: the same, as of at most ~50 ms ago (meters current), without waiting.
  * brack_list_audio_devices / brack_list_midi_inputs / brack_scan_plugins: arrays. */
 BRACK_API int BRACK_CALL brack_get_status(brack_engine* e, char* buf, size_t size, size_t* needed);

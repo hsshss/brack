@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "plugin/plugin.h"
+#include "plugin/chain.h"
 
 namespace brack {
 
@@ -19,11 +19,14 @@ int runPluginHost(const std::vector<std::string>& args);
 // libbrack.so, libbrack.dylib); on Linux and macOS, else in the installation's libexec/brack.
 std::filesystem::path pluginHostExecutable(const std::string& architecture);
 
-// A plugin running in a plugin host process of its own, of the plugin's architecture. A crash
-// or a hang ends only that process: the plugin is then crashed (see HostedPlugin), keeps its
-// last state, and can be loaded again in a new process.
-std::unique_ptr<HostedPlugin> createRemotePlugin(PluginHostListener& listener, const std::string& pathUtf8,
-                                                 const std::string& pluginId, const std::string& architecture);
+// A chain running in a plugin host process of its own: with the instrument at `pathUtf8`, in a
+// process of its architecture, or (the master's) without one, in a process of Brack's. A crash or
+// a hang ends only that process: the chain is then crashed, its plugins keep their last states,
+// and they can be loaded again in a new process. Null, with `error`, if the instrument does not load.
+std::unique_ptr<HostedChain> createRemoteChain(PluginHostListener& listener, const std::string& pathUtf8,
+                                               const std::string& pluginId, const std::string& architecture,
+                                               std::string& error);
+std::unique_ptr<HostedChain> createRemoteMasterChain(PluginHostListener& listener, std::string& error);
 
 // Describes plugin files in plugin host processes, one per architecture, kept for the next
 // file. A file whose plugin crashes or hangs while being described fails alone: the next one

@@ -455,6 +455,43 @@ static void error_codes(const char* synth) {
     brack_engine_destroy(e);
 }
 
+/* An effect on the instrument, and one on the master: each halves what comes to it. */
+static void effects(const char* synth, const char* gain) {
+    brack_engine* e = brack_engine_create();
+    CHECK(brack_start_manual(e, 48000, 2, 256) == BRACK_OK);
+    CHECK(brack_add_plugin(e, "s", synth, NULL, NULL, 0) == BRACK_OK);
+    const uint8_t on[3] = {0x90, 69, 127};
+    CHECK(brack_send_midi(e, "s", 0, on, 3) == BRACK_OK);
+    render_peak(e, 2400);
+    const float dry = render_peak(e, 4800);
+    char id[BRACK_ID_MAX];
+    CHECK(brack_add_effect(e, "s", 0, NULL, gain, "brack.test.gain", id, sizeof id) == BRACK_OK);
+    render_peak(e, 2400);
+    const float wet = render_peak(e, 4800);
+    printf("effect %s: %.3f, then %.3f\n", id, dry, wet);
+    CHECK(dry > 0.2f && fabsf(wet - dry * 0.5f) < dry * 0.03f);
+    CHECK(brack_set_effect_bypass(e, id, 1) == BRACK_OK);
+    CHECK(brack_add_effect(e, NULL, 0, "m", gain, NULL, NULL, 0) == BRACK_OK); /* the master's */
+    render_peak(e, 2400);
+    CHECK(fabsf(render_peak(e, 4800) - dry * 0.5f) < dry * 0.03f);
+
+    size_t needed = 0;
+    brack_get_status(e, NULL, 0, &needed);
+    char* status = (char*)malloc(needed);
+    CHECK(brack_get_status(e, status, needed, NULL) == BRACK_OK);
+    CHECK(strstr(status, "\"masterEffects\"") != NULL && strstr(status, "\"bypass\": true") != NULL);
+    free(status);
+
+    CHECK(brack_add_effect(e, "nope", 0, NULL, gain, NULL, NULL, 0) == BRACK_ERR_NOT_FOUND);
+    CHECK(brack_add_effect(e, "m", 0, NULL, gain, NULL, NULL, 0) == BRACK_ERR_NOT_FOUND); /* an effect */
+    CHECK(brack_add_effect(e, "s", 0, NULL, synth, NULL, NULL, 0) == BRACK_ERR_FAILED); /* not an effect */
+    CHECK(brack_set_effect_bypass(e, "nope", 1) == BRACK_ERR_NOT_FOUND);
+    CHECK(brack_set_effect_bypass(e, "s", 1) == BRACK_ERR_FAILED); /* an instrument */
+    CHECK(brack_remove_plugin(e, "m") == BRACK_OK);
+    CHECK(brack_remove_plugin(e, id) == BRACK_OK);
+    brack_engine_destroy(e);
+}
+
 static int exists(const char* path) {
     struct stat st;
     return stat(path, &st) == 0;
@@ -701,8 +738,9 @@ static void mixed_architectures(char** synths, char** other_bins, int other_coun
 }
 
 static int run(int argc, char** argv) {
-    if (argc < 4) {
-        fprintf(stderr, "usage: test_dll <brack-test-synth.clap> <vst2 synth> <vst3 synth> [<other architectures' bin folders>...]\n");
+    if (argc < 5) {
+        fprintf(stderr, "usage: test_dll <brack-test-synth.clap> <vst2 synth> <vst3 synth> <brack-test-gain.clap> "
+                        "[<other architectures' bin folders>...]\n");
         return 2;
     }
     CHECK(brack_api_version() == BRACK_API_VERSION);
@@ -784,7 +822,8 @@ static int run(int argc, char** argv) {
 #endif
     cached_scan(argv[1]);
     error_codes(argv[1]);
-    mixed_architectures(argv + 1, argv + 4, argc - 4);
+    effects(argv[1], argv[4]);
+    mixed_architectures(argv + 1, argv + 5, argc - 5);
     const int hangs = brack_virtual_midi_removal_hangs();
     printf("virtual port removal hangs the MIDI service: %d\n", hangs);
     CHECK(hangs == 0 || hangs == 1);

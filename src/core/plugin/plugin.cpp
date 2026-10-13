@@ -28,6 +28,12 @@ const char* pluginFormatLabel(PluginFormat f) {
     return "CLAP";
 }
 
+uint32_t mainPort(const std::vector<AudioPortInfo>& ports) {
+    for (uint32_t i = 0; i < ports.size(); ++i)
+        if (ports[i].isMain) return i;
+    return 0;
+}
+
 std::string pluginLabel(const PluginDescription& d) {
     const bool foreign = d.architecture != buildArchitecture();
     return d.name + " [" + pluginFormatLabel(d.format) + (foreign ? ", " + d.architecture : "") + "]";
@@ -211,6 +217,7 @@ void PluginInstance::allocateBuffers(uint32_t maxFrames) {
     };
     build(audioIns_, inStorage_, inPtrs_);
     build(audioOuts_, outStorage_, outPtrs_);
+    mainInput_ = audioIns_.empty() ? 0 : mainPort(audioIns_);
 }
 
 bool PluginInstance::activate(double sampleRate, uint32_t maxFrames, std::string& error) {
@@ -257,6 +264,12 @@ void PluginInstance::requestStopProcessing() {
     stopRequested_.store(true, std::memory_order_release);
 }
 
+void PluginInstance::resumeProcessing() {
+    if (!active_) return;
+    stopRequested_.store(false, std::memory_order_release);
+    stopAck_.store(false, std::memory_order_release);
+}
+
 void PluginInstance::forceStopProcessing() {
     // The audio thread is gone (device stopped or lost); act as the audio thread.
     setCurrentThreadIsAudio(true);
@@ -282,6 +295,10 @@ void PluginInstance::appendMidi(InputEventList& list, uint16_t port, const uint8
 }
 
 bool PluginInstance::process(uint32_t frames, uint64_t steadyTime, const InputEventList& in) {
+    struct TakeInput {  // setMainInput() is for this call only, however it ends
+        uint32_t& count;
+        ~TakeInput() { count = 0; }
+    } takeInput{mainInputCount_};
     if (!active_.load(std::memory_order_acquire)) return false;
     if (stopRequested_.load(std::memory_order_acquire)) {
         if (processing_) {
@@ -301,8 +318,15 @@ bool PluginInstance::process(uint32_t frames, uint64_t steadyTime, const InputEv
         }
         processing_ = true;
     }
+    frames = std::min(frames, maxFrames_);
+    // Every input afresh: plugins may process in place, writing over their inputs.
+    for (size_t p = 0; p < inPtrs_.size(); ++p)
+        for (uint32_t c = 0; c < inPtrs_[p].size(); ++c) {
+            if (p == mainInput_ && c < mainInputCount_) std::memcpy(inPtrs_[p][c], mainInputChannels_[c], frames * sizeof(float));
+            else std::memset(inPtrs_[p][c], 0, frames * sizeof(float));
+        }
     bool ok = false;
-    callPlugin("process", [&] { ok = processPlugin(std::min(frames, maxFrames_), steadyTime, in); });
+    callPlugin("process", [&] { ok = processPlugin(frames, steadyTime, in); });
     if (!ok) {
         processFailed_ = true;
         return false;
@@ -310,15 +334,9 @@ bool PluginInstance::process(uint32_t frames, uint64_t steadyTime, const InputEv
     return true;
 }
 
-void PluginInstance::beginProcess(uint32_t frames, uint64_t steadyTime, const InputEventList& in) {
-    pendingFrames_ = frames;
-    pendingTime_ = steadyTime;
-    pendingIn_ = &in;
-}
-
-bool PluginInstance::endProcess() {
-    const InputEventList* in = std::exchange(pendingIn_, nullptr);
-    return in && process(pendingFrames_, pendingTime_, *in);
+void PluginInstance::setMainInput(const float* const* channels, uint32_t count) {
+    mainInputChannels_ = channels;
+    mainInputCount_ = count;
 }
 
 const float* PluginInstance::outputChannel(uint32_t port, uint32_t channel) const {

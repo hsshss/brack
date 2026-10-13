@@ -229,6 +229,40 @@ public sealed unsafe class BrackEngine : IDisposable
         fixed (byte* p = state) Interop.Check(NativeMethods.brack_set_plugin_state(_handle, pluginId, p, (nuint)state.Length));
     }
 
+    // ---- effects ----
+
+    /// <summary>
+    /// Adds an effect to an instrument's chain, on its main output, or to the master's, on the mix of every
+    /// instrument (before the SRC and the master gain), and returns its id. It must be built for its instrument's
+    /// architecture (the master's: brack.dll's). An effect is a plugin to the methods above (editor, name, state;
+    /// removing it; reloading reloads its chain; moving moves it among its chain's effects), but takes no MIDI and
+    /// has no audio routes. When a plugin of a chain crashes, the chain is silent until it is reloaded. An effect
+    /// for a chain in a plugin host loads on the calling thread while other calls go on; it fails if its chain is
+    /// removed or reloaded meanwhile.
+    /// </summary>
+    /// <param name="ownerId">The instrument; null for the master.</param>
+    /// <param name="index">Where among the chain's effects (clamped).</param>
+    /// <param name="path">A .clap file, a .vst3 bundle or file, or a VST2 .dll.</param>
+    /// <param name="pluginId">Which plugin in the file; null for the first.</param>
+    /// <param name="id">The effect's id; null to make one from the plugin's name.</param>
+    public string AddEffect(string? ownerId, int index, string path, string? pluginId = null, string? id = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        uint at = (uint)Math.Max(index, 0);
+        if (!string.IsNullOrEmpty(id))
+        {
+            Interop.Check(NativeMethods.brack_add_effect(_handle, ownerId, at, id, path, pluginId, null, 0));
+            return id;
+        }
+        byte* idOut = stackalloc byte[NativeMethods.BRACK_ID_MAX];
+        Interop.Check(NativeMethods.brack_add_effect(_handle, ownerId, at, null, path, pluginId, idOut, NativeMethods.BRACK_ID_MAX));
+        return Interop.Utf8(idOut) ?? "";
+    }
+
+    /// <summary>A bypassed effect is not processed: what comes to it goes on unchanged.</summary>
+    public void SetEffectBypass(string effectId, bool bypass) =>
+        Interop.Check(NativeMethods.brack_set_effect_bypass(_handle, effectId, bypass ? 1 : 0));
+
     // ---- MIDI sources ----
 
     /// <summary>Adds a MIDI source and returns its id.</summary>

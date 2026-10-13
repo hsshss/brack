@@ -22,7 +22,7 @@ src/host/                   plugin host process (brack-host-<architecture>)
 src/dll/  src/cli/  src/gui/
 src/gui/icon/               the application icon (SVG, and the files for each OS exported from it)
 bindings/dotnet/            .NET binding (Brack) and its tests
-tests/                      test synths (CLAP / VST3 / VST2) and tests
+tests/                      test synths and effects (CLAP / VST3 / VST2) and tests
 tools/vmidi_probe/          virtual port diagnostic tool
 tools/midi-timing/          MIDI timing measurement (design notes, chapter 15)
 tools/app-icon/             exports the files for each OS from the icon SVG
@@ -91,7 +91,7 @@ The x64 and x86 builds bundle each other's plugin hosts, and the ARM64 build bun
 
 - `build\bin` gets `brack.exe` (the GUI), `brack-cli.exe`, `brack.dll` and the bundled plugin hosts. `cmake --install` puts these in `bin`, `brack.h` in `include` and `brack.lib` in `lib`.
 - On an ARM64 PC, you can also build x64 and x86 into `build` and `build-x86` with `vcvarsarm64_amd64.bat` and `vcvarsarm64_x86.bat`. The tests run under Windows' emulation.
-- With MSVC, targets of the same name (`brack.exe` and `brack.dll`, which land in the same folder, and `brack-test-synth`, the CLAP and VST3 test synths) try to write the same `.pdb` and `.ilk`. So the linker files are kept apart (the GUI's PDB is `brack-gui.pdb`, and `/INCREMENTAL:NO`), and `add_dependencies` makes them link one after another. The reason is that the linker deletes an old `.ilk` of the same name, so linking them at the same time deletes the other's `.ilk`.
+- With MSVC, targets of the same name (`brack.exe` and `brack.dll`, which land in the same folder, `brack-test-synth`, the CLAP and VST3 test synths, and `brack-test-gain`, the test effects) try to write the same `.pdb` and `.ilk`. So the linker files are kept apart (the GUI's PDB is `brack-gui.pdb`, and `/INCREMENTAL:NO`), and `add_dependencies` makes them link one after another. The reason is that the linker deletes an old `.ilk` of the same name, so linking them at the same time deletes the other's `.ilk`.
 
 ### Linux
 
@@ -144,7 +144,7 @@ To sign with the Hardened Runtime for distribution, add `-DBRACK_CODESIGN_IDENTI
 
 ## Tests and tools
 
-- ctest includes tests of the engine, the test synth of each format, crash containment, the plugin host, the DLL, the .NET binding and more ([design notes](design-notes.md), chapter 8, in Japanese).
+- ctest includes tests of the engine, the test synth and effect of each format, crash containment, the plugin host, the DLL, the .NET binding and more ([design notes](design-notes.md), chapter 8, in Japanese).
   - The .NET tests (`bindings/dotnet/Brack.Tests`) are part of ctest in the 64-bit builds when the .NET SDK is present (Windows, Linux, macOS).
   - `test_api_parity` checks that the engine's public methods and the C API match, and that every C API function is in the .NET binding.
   - `test_isolation` also shows the time per block ([design notes](design-notes.md), chapter 15, in Japanese). `test_isolation --block-cost <brack-test-synth.clap> [<frames>]` measures only the block cost. It runs 1, 2, 4 and 8 plugins, and measures both with blocks back to back and with each block processed at its own time as a real device does (paced). Without `<frames>`, it measures both 64 and 256 frames. On Linux and macOS it also shows how many times per block the thread slept (and, on Linux only, how many times it moved to another CPU).

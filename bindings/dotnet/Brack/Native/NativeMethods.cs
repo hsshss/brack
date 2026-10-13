@@ -52,6 +52,10 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial byte* brack_architecture();
+
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial byte* brack_last_error();
 
     [LibraryImport(Library)]
@@ -135,6 +139,15 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int brack_set_plugin_state(BrackEngineHandle e, string plugin_id, byte* data, nuint size);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int brack_add_effect(BrackEngineHandle e, string? owner_id, uint index, string? id,
+                                                 string plugin_path, string? plugin_id, byte* id_out, nuint id_out_size);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int brack_set_effect_bypass(BrackEngineHandle e, string effect_id, int bypass);
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -229,6 +242,10 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int brack_save_session_json(BrackEngineHandle e, byte* buf, nuint size, nuint* needed);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int brack_describe_session(string path, byte* buf, nuint size, nuint* needed);
 
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

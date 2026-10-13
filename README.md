@@ -2,12 +2,13 @@
 
 English | [日本語](README.ja.md)
 
-A simple host for playing many CLAP, VST3 and VST2 software instruments at once. You choose freely which MIDI inputs go to which instruments, and which speaker channels each instrument's outputs go to.
+A host for listening, playing many CLAP, VST3 and VST2 software instruments at once. You choose freely which MIDI inputs go to which instruments, and which speaker channels each instrument's outputs go to.
 
 ## Features
 
 - **MIDI passed through unchanged** — Brack hands the MIDI it receives to the instruments without converting it (except to VST3, whose format requires conversion).
 - **Free routing** — Connect MIDI inputs to instruments, and instrument outputs to output channels, many to many.
+- **Effects** — Run effects one after another on each instrument, and on the mix of all of them.
 - **A sample rate of your choice for the instruments** — Run the instruments at any rate (96 kHz, for example), and Brack converts their output to the output device's rate at high quality.
 - **Virtual MIDI ports** — Create ports through which other applications send MIDI to Brack's instruments. Even on Windows, you need no loopMIDI or similar.
 - **Keeps playing when an instrument crashes** — Each instrument runs in a process of its own, so when one crashes or hangs, Brack and the other instruments keep playing.
@@ -42,13 +43,16 @@ What the release contains is in [the details](docs/details.md#release-contents),
 
 The menu on the left switches between **Rack**, **Routing**, **Audio settings** and **Log**.
 
-1. In **Rack**, add instruments with "Add instrument". The list shows the instruments found on the computer, and you can filter it by name or vendor. To load one that is not in the list, or an effect, choose its file with "From file...".
+1. In **Rack**, add instruments with "Add instrument". The list shows the instruments found on the computer, and you can filter it by name or vendor. To load one that is not in the list, choose its file with "From file...".
 2. Under MIDI INPUTS at the bottom of **Rack**, add MIDI inputs (ports of connected devices, or virtual ports that Brack creates).
 3. In the **Routing** table, check which inputs go to which instruments. Below it, choose which output channels each instrument output goes to. A new instrument starts connected to outputs 1 and 2.
 4. Set the volume of each output channel with the faders in the instrument's panel in **Rack** (double-click for 0 dB).
 5. Change the output device and the sample rate in **Audio settings**. Changes take effect when you click "Apply".
 
 - The "Editor" button opens an instrument's own window.
+- "Add effect" in an instrument's panel adds an effect to that instrument. Effects apply from top to bottom. Add effects for the mix of all the instruments under MASTER.
+- Unchecking the box left of an effect's name plays without that effect. Drag effects to reorder them.
+- An effect must be built for the instrument's architecture (under MASTER, for Brack's).
 - The "MASTER" fader at the top sets the overall volume (all the way left mutes, double-click for 0 dB).
 - To rename an instrument, double-click its name or use "Rename" in the "..." menu. Drag instruments and MIDI inputs to reorder them.
 - "Copy all" in **Log** copies the log to the clipboard.
@@ -71,6 +75,8 @@ The detailed saving rules, and how to take a rack to another OS, are in [the det
 ### When an instrument crashes
 
 A crashed instrument shows "Crashed" and goes silent, and Brack and the other instruments keep playing. The Log shows where it crashed. Click "Reload" to load it again from its state before the crash.
+
+When an effect crashes, the instrument it was on goes silent too (for an effect under MASTER, everything does). "Reload" loads the instrument and its effects again together.
 
 ### Virtual MIDI ports
 

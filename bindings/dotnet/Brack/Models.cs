@@ -20,10 +20,12 @@ public sealed record EngineStatus(
     float CpuLoad,
     IReadOnlyList<float> OutputPeaks,
     IReadOnlyList<PluginStatus> Plugins,
+    IReadOnlyList<PluginStatus> MasterEffects,
     IReadOnlyList<MidiSourceStatus> MidiSources,
     IReadOnlyList<MidiRoute> MidiRoutes,
     IReadOnlyList<AudioRoute> AudioRoutes);
 
+/// <summary>An instrument with its chain of effects, or an effect (whose own Effects are empty).</summary>
 public sealed record PluginStatus(
     string Id,
     string Name,
@@ -41,7 +43,9 @@ public sealed record PluginStatus(
     bool GuiOpen,
     uint Latency,
     IReadOnlyList<NotePortInfo> NotePorts,
-    IReadOnlyList<AudioPortInfo> AudioOutputs);
+    IReadOnlyList<AudioPortInfo> AudioOutputs,
+    bool Bypass,
+    IReadOnlyList<PluginStatus> Effects);
 
 /// <summary>A note input port and the dialects it accepts.</summary>
 public sealed record NotePortInfo(string Name, bool Midi, bool Clap);
@@ -67,6 +71,20 @@ public sealed record PluginDescription(
     IReadOnlyList<string> Features,
     string Architecture);
 
+/// <summary>What a session file holds, as brack_describe_session reads it without loading it.</summary>
+public sealed record SessionContents(IReadOnlyList<SessionPlugin> Plugins, IReadOnlyList<SessionPlugin> MasterEffects);
+
+/// <summary>An instrument with its effects, or an effect, in a session file; Name is empty if the file has
+/// none.</summary>
+public sealed record SessionPlugin(
+    string Id,
+    string Name,
+    PluginFormat Format,
+    string Path,
+    string PluginId,
+    bool Bypass,
+    IReadOnlyList<SessionPlugin> Effects);
+
 public sealed record AudioDeviceInfo(
     string Name,
     [property: JsonPropertyName("default")] bool IsDefault,
@@ -78,6 +96,7 @@ public sealed record AudioDeviceInfo(
                              UseStringEnumConverter = true)]
 [JsonSerializable(typeof(EngineStatus))]
 [JsonSerializable(typeof(PluginDescription[]))]
+[JsonSerializable(typeof(SessionContents))]
 [JsonSerializable(typeof(AudioDeviceInfo[]))]
 [JsonSerializable(typeof(string[]))]
 internal sealed partial class BrackJson : JsonSerializerContext

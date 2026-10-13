@@ -1,7 +1,8 @@
 #pragma once
 // Format-independent plugin interface. The engine sees every plugin (CLAP, VST2, VST3), in this
-// process or another, through HostedPlugin; MIDI reaches it as an InputEventList, which uses
-// CLAP's event structs as brack's own event representation.
+// process or another, through HostedPlugin, and processes it as part of a HostedChain
+// (plugin/chain.h); MIDI reaches it as an InputEventList, which uses CLAP's event structs as
+// brack's own event representation.
 
 #include <clap/clap.h>
 
@@ -74,6 +75,9 @@ struct AudioPortInfo {
     bool isMain = false;
 };
 
+// The main port among `ports`: the first flagged so, else the first. Only for a non-empty list.
+uint32_t mainPort(const std::vector<AudioPortInfo>& ports);
+
 // Real-time event list handed to HostedPlugin::beginProcess(). Pre-allocated; the
 // audio thread fills it without allocating.
 class InputEventList {
@@ -122,20 +126,15 @@ public:
 };
 
 // A plugin as the engine sees it: in this process (PluginInstance) or in a plugin host process
-// of its own (RemotePlugin). Calls are on the host thread unless noted.
+// (a plugin of a chain there). Its chain (plugin/chain.h) activates and processes it. Calls are on
+// the host thread.
 class HostedPlugin {
 public:
     virtual ~HostedPlugin() = default;
     HostedPlugin(const HostedPlugin&) = delete;
     HostedPlugin& operator=(const HostedPlugin&) = delete;
 
-    // Creates the plugin; afterwards description() and hasGui() are final.
-    virtual bool init(std::string& error) = 0;
-    // Afterwards the ports are final until the next activation.
-    virtual bool activate(double sampleRate, uint32_t maxFrames, std::string& error) = 0;
-    virtual void deactivate() = 0;
     virtual bool isActive() const = 0;
-    virtual void idle() = 0;  // about every 10 ms: deferred plugin requests, editor idle; reports a crash
 
     // A crashed plugin answers with the state it last saved or loaded.
     virtual bool saveState(std::vector<uint8_t>& out) = 0;
@@ -149,35 +148,16 @@ public:
     virtual bool openGui(std::string& error, void* parent = nullptr) = 0;
     virtual void closeGui() = 0;
 
-    // Stop/start handshake with the audio thread (formats start and stop processing there).
-    virtual void requestStopProcessing() = 0;
-    virtual bool stopProcessingAcknowledged() const = 0;
-
     const std::vector<NotePortInfo>& notePorts() const { return notePorts_; }
     const std::vector<AudioPortInfo>& audioInputs() const { return audioIns_; }
     const std::vector<AudioPortInfo>& audioOutputs() const { return audioOuts_; }
     uint32_t latency() const { return isActive() ? latency_.load(std::memory_order_relaxed) : 0; }
     const PluginDescription& description() const { return desc_; }
     virtual void setDisplayName(std::string name) = 0;  // also retitles an open editor
-    virtual bool restartPending() const = 0;
     virtual bool processFailed() const = 0;
     virtual bool crashed() const = 0;
     // What the crash was ("crashed in process: access violation at X.dll+0x1234").
     virtual std::string crashReport() const = 0;
-    // Runs in a plugin host process rather than in this one.
-    virtual bool separateProcess() const = 0;
-
-    // ---- audio thread ----
-    // Appends one MIDI message for note port `port`, at frame `time` of the block. Raw MIDI is
-    // passed through untouched whenever the format allows it.
-    virtual void appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
-                            uint32_t time) const = 0;
-    // Processes `frames` frames, in two steps so that plugins in other processes run side by
-    // side: beginProcess() for every plugin of the block, then endProcess() for each, which
-    // returns false when the plugin produced no audio. `in` stays untouched until then.
-    virtual void beginProcess(uint32_t frames, uint64_t steadyTime, const InputEventList& in) = 0;
-    virtual bool endProcess() = 0;
-    virtual const float* outputChannel(uint32_t port, uint32_t channel) const = 0;
 
 protected:
     explicit HostedPlugin(PluginDescription desc) : desc_(std::move(desc)) {}
@@ -205,11 +185,13 @@ public:
     ~PluginInstance() override;  // host thread; derived destructors call shutdown() first
 
     // ---- host thread ----
-    bool init(std::string& error) override;
-    bool activate(double sampleRate, uint32_t maxFrames, std::string& error) override;
-    void deactivate() override;
+    // Creates the plugin; afterwards description() and hasGui() are final.
+    bool init(std::string& error);
+    // Afterwards the ports are final until the next activation.
+    bool activate(double sampleRate, uint32_t maxFrames, std::string& error);
+    void deactivate();
     bool isActive() const override { return active_; }
-    void idle() override;
+    void idle();  // about every 10 ms: deferred plugin requests, editor idle
 
     bool saveState(std::vector<uint8_t>& out) override;
     bool loadState(const std::vector<uint8_t>& in) override;
@@ -218,26 +200,32 @@ public:
     bool openGui(std::string& error, void* parent = nullptr) override;
     void closeGui() override;
 
-    void requestStopProcessing() override;
-    bool stopProcessingAcknowledged() const override { return stopAck_.load(std::memory_order_acquire); }
+    // Stop/start handshake with the audio thread (formats start and stop processing there):
+    // the next process() stops it and acknowledges, and it stays stopped until resumed.
+    void requestStopProcessing();
+    bool stopProcessingAcknowledged() const { return stopAck_.load(std::memory_order_acquire); }
+    // While no process() runs: the next one processes again, whether or not it stopped.
+    void resumeProcessing();
     void forceStopProcessing();  // when no audio thread will run any more
 
     std::string displayName() const;
     void setDisplayName(std::string name) override;
-    bool restartPending() const override { return restartRequested_; }
+    bool restartPending() const { return restartRequested_; }
     bool processFailed() const override { return processFailed_; }
     bool crashed() const override { return crashed_.load(std::memory_order_acquire); }
     std::string crashReport() const override;
-    bool separateProcess() const override { return false; }
 
     // ---- audio thread ----
-    void appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
-                    uint32_t time) const override;
+    // Appends one MIDI message for note port `port`, at frame `time` of the block. Raw MIDI is
+    // passed through untouched whenever the format allows it.
+    virtual void appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+                            uint32_t time) const;
+    // The main audio input of the next process(): `count` channels of its frames. Channels it has
+    // past them, and every input without this, are silent.
+    void setMainInput(const float* const* channels, uint32_t count);
     // Processes `frames` frames; returns false when the plugin produced no audio.
     bool process(uint32_t frames, uint64_t steadyTime, const InputEventList& in);
-    void beginProcess(uint32_t frames, uint64_t steadyTime, const InputEventList& in) override;
-    bool endProcess() override;
-    const float* outputChannel(uint32_t port, uint32_t channel) const override;
+    const float* outputChannel(uint32_t port, uint32_t channel) const;
 
     HostThread& hostThread() { return host_; }
     // For the formats creating their editor window: where openGui() wants it.
@@ -293,9 +281,12 @@ protected:
     void portsChanged();
     PluginEditor* editor() const { return editor_.get(); }
 
+    // Audio thread, in processPlugin(): input port `port` is all silence this block.
+    bool inputSilent(size_t port) const { return port != mainInput_ || mainInputCount_ == 0; }
+
     HostThread& host_;
     PluginHostListener& listener_;
-    // Per port, per channel; maxFrames_ samples each. Inputs are silent.
+    // Per port, per channel; maxFrames_ samples each. Inputs are filled before each processPlugin().
     std::vector<std::vector<float*>> inPtrs_, outPtrs_;
     uint32_t maxFrames_ = 0;
     double sampleRate_ = 0;
@@ -311,10 +302,10 @@ private:
 
     std::atomic<bool> active_{false};
     bool processing_ = false;  // audio thread
-    // Audio thread: the block beginProcess() was given, for endProcess().
-    uint32_t pendingFrames_ = 0;
-    uint64_t pendingTime_ = 0;
-    const InputEventList* pendingIn_ = nullptr;
+    // Audio thread: what setMainInput() gave for the next process(), which takes it.
+    size_t mainInput_ = 0;
+    const float* const* mainInputChannels_ = nullptr;
+    uint32_t mainInputCount_ = 0;
     std::atomic<bool> stopRequested_{false};
     std::atomic<bool> stopAck_{true};
     std::atomic<bool> processFailed_{false};

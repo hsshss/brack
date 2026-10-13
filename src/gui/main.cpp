@@ -77,6 +77,13 @@ constexpr ViewEntry kViews[] = {
 };
 
 class App {
+    // What the add dialog adds: an instrument, or an effect to the chain of `owner` (the master's:
+    // ""), built for `architecture`.
+    struct AddTarget {
+        bool effect = false;
+        std::string owner, architecture;
+    };
+
 public:
     // configDir: where the settings and the plugin cache are kept.
     App(const GuiSettings& settings, std::filesystem::path configDir) : configDir_(std::move(configDir)) {
@@ -348,8 +355,6 @@ private:
             // VST2 plugins are instantiated to be described.
             const auto cachePath = configDir_.empty() ? std::string() : pathToUtf8(configDir_ / "plugin-cache.json");
             auto found = Engine::scanPlugins(dirs, cachePath);
-            // brack hosts instruments: effects stay out of the list ("From file..." still loads anything).
-            std::erase_if(found, [](const PluginDescription& d) { return !d.isInstrument(); });
             std::sort(found.begin(), found.end(), [](auto& a, auto& b) { return a.name < b.name; });
             std::lock_guard lock(scanMutex_);
             scanned_ = std::move(found);
@@ -648,10 +653,10 @@ private:
     void rackView() {
         Row title = viewTitle("Rack");
         title.placeRight(buttonWidth("Add instrument", look::primary, len::button, Icon::Plus), px(len::button));
-        if (button("Add instrument", look::primary, len::button, Icon::Plus)) openAdd_ = true;
+        if (button("Add instrument", look::primary, len::button, Icon::Plus)) openAddDialog({});
         title.gapRight(8);
         title.placeRight(buttonWidth("From file...", look::outline, len::button, Icon::File), px(len::button));
-        if (button("From file...", look::outline, len::button, Icon::File)) chooseFile();
+        if (button("From file...", look::outline, len::button, Icon::File)) chooseFile({});
         title.end(12);
 
         sectionHeader("INSTRUMENTS", col::text, "Drag to reorder · double-click a name to rename, a volume for 0 dB");
@@ -664,8 +669,112 @@ private:
         for (size_t row = 0; row < snap_.plugins.size(); ++row) pluginCard(row);
         ImGui::Dummy(ImVec2(0, 0));
         spaceBelow(10);
+        sectionHeader("MASTER", col::audio, "Effects on the mix of every instrument, before the master volume");
+        beginCard("master", 0, col::card, col::border, ImVec2(8, 6));
+        {
+            constexpr float indent = 30;  // as an instrument's body
+            const float x = ImGui::GetCursorScreenPos().x + px(indent), width = ImGui::GetContentRegionAvail().x - px(6 + indent);
+            effectRows(snap_.masterEffects, "", buildArchitecture(), x, width);
+        }
+        endCard();
+        spaceBelow(10);
         sectionHeader("MIDI INPUTS", col::midi);
         sourcesCard();
+    }
+
+    // A chain's effects, one a row, and a row to add one: the instrument `owner`'s, or the
+    // master's (""), whose effects are built for `architecture`.
+    // `canAdd`: the owner is loaded.
+    void effectRows(const std::vector<EngineSnapshot::Plugin>& effects, const std::string& owner,
+                    const std::string& architecture, float x, float width, bool canAdd = true) {
+        for (size_t i = 0; i < effects.size(); ++i) effectRow(effects[i], owner, i, x, width, i == 0 ? "EFFECTS" : "");
+        if (!canAdd) return;
+        ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
+        Row row(26, width);
+        drawText(row.next(px(72), px(11)), fonts.bold, 11, col::text3, effects.empty() ? "EFFECTS" : "");
+        row.gap(8);
+        row.place(buttonWidth("Add effect", look::ghost, len::lineButton, Icon::Plus, 12), px(len::lineButton));
+        if (button("Add effect", look::ghost, len::lineButton, Icon::Plus, 12)) openAddDialog({true, owner, architecture});
+        row.end();
+    }
+
+    // One effect of the chain of `owner` (the master's: ""), at `index` among its effects.
+    void effectRow(const EngineSnapshot::Plugin& fx, const std::string& owner, size_t index, float x, float width,
+                   const char* label) {
+        ImGui::PushID(fx.id.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
+        Row row(26, width);
+        drawText(row.next(px(72), px(11)), fonts.bold, 11, col::text3, label);
+        row.gap(8);
+        const std::string shown = displayName(fx);
+        // The box's place stays when it is not shown, keeping the names in line.
+        const float box = checkboxWidth("##on");
+        if (canReload(fx)) {
+            row.next(box, px(len::lineButton));
+        } else {
+            bool on = !fx.bypass;
+            row.place(box, px(len::lineButton));
+            if (checkbox("##on", on, len::lineButton))
+                runAsync(on ? "Turning an effect on" : "Bypassing an effect", [this, id = fx.id, on] {
+                    std::string err;
+                    if (!engine_.setEffectBypass(id, !on, err)) error(err);
+                });
+            ImGui::SetItemTooltip(fx.bypass ? "Bypassed: what comes in goes on unchanged (check to turn on)"
+                                             : "On (uncheck to bypass)");
+        }
+        row.gap(10);
+        if (renaming_ == fx.id) {
+            renameField(row, shown);
+        } else {
+            // The row past the label is the handle; the buttons on it stay clickable.
+            ImGui::SetCursorScreenPos(ImVec2(row.left(), row.top()));
+            ImGui::SetNextItemAllowOverlap();
+            ImGui::InvisibleButton("##effect", ImVec2(std::max(1.0f, row.remaining()), row.height()));
+            if (ImGui::IsItemHovered()) {
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) startRename(fx);
+                ImGui::SetTooltip("id: %s\n%s %s\n%s\n(drag to reorder, double-click to rename)", fx.id.c_str(),
+                                  pluginFormatLabel(fx.format), fx.pluginId.c_str(), fx.path.c_str());
+            }
+            std::string from;
+            if (dragReorder("BRACK_EFFECT", fx.id, shown, from) && chainOf(from) == owner)
+                runAsync("Reordering", [this, from, index] {
+                    std::string err;
+                    if (!engine_.movePlugin(from, index, err)) error(err);
+                });
+            drawText(row.next(textWidth(fonts.sans, 13, shown), px(13)), fonts.sans, 13, fx.bypass ? col::text3 : col::text, shown);
+        }
+        row.gap(10);
+        const char* format = pluginFormatLabel(fx.format);
+        const ImVec2 sz = badgeSize(format, fonts.mono, 10, 5);
+        badge(row.next(sz.x, sz.y), format, fonts.mono, 10, col::control, 0, col::text2, 5);
+        row.gap(14);
+
+        pluginButtons(row, fx);
+
+        // The status, clipped to the room left between the badge and the buttons.
+        const ImVec2 s0(row.left(), row.top()), s1(row.left() + std::max(0.0f, row.remaining()), row.top() + row.height());
+        ImGui::PushClipRect(s0, s1, true);
+        if (fx.crashed || !fx.loaded || fx.failed) {
+            const std::string what = fx.crashed ? "Crashed" : fx.failed ? "process error" : fx.status;
+            drawText(row.next(textWidth(fonts.sans, 12, what), px(12)), fonts.sans, 12, col::error, what);
+            if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(s0, s1)) ImGui::SetTooltip("%s", fx.status.c_str());
+        } else if (fx.latency) {
+            const std::string what = "latency " + std::to_string(fx.latency);
+            drawText(row.next(textWidth(fonts.sans, 12, what), px(12)), fonts.sans, 12, col::text2, what);
+        }
+        ImGui::PopClipRect();
+        row.end(2);
+        ImGui::PopID();
+    }
+
+    // The instrument whose chain the effect `id` is in, "" for the master's; nullopt for no effect.
+    std::optional<std::string> chainOf(const std::string& id) const {
+        for (auto& p : snap_.plugins)
+            for (auto& fx : p.effects)
+                if (fx.id == id) return p.id;
+        for (auto& fx : snap_.masterEffects)
+            if (fx.id == id) return std::string();
+        return std::nullopt;
     }
 
     // "L" / "R" for a stereo port, else the channel's number; prefixed with the port's number
@@ -692,6 +801,64 @@ private:
         renameFocus_ = true;
     }
 
+    // A plugin that crashed in a plugin host, or did not load: Reload, in place of its editor.
+    static bool canReload(const EngineSnapshot::Plugin& p) { return (p.crashed && p.separateProcess) || !p.loaded; }
+
+    // Right to left on `row`: the "..." menu (`extraItems` after Rename), then Reload or Editor.
+    void pluginButtons(Row& row, const EngineSnapshot::Plugin& p, const std::function<void()>& extraItems = {}) {
+        row.placeRight(px(len::lineButton), px(len::lineButton));
+        if (button("##more", look::ghost, len::lineButton, Icon::More)) ImGui::OpenPopup("more");
+        if (beginPopupMenu("more")) {
+            if (ImGui::MenuItem("Rename")) startRename(p);
+            if (extraItems) extraItems();
+            if (canReload(p) && ImGui::MenuItem("Reload")) reload(p);
+            if (ImGui::MenuItem("Remove")) {
+                runAsync("Removing " + p.id, [this, id = p.id] {
+                    std::string err;
+                    if (!engine_.removePlugin(id, err)) error(err);
+                });
+            }
+            endPopupMenu();
+        }
+        row.gapRight(6);
+        if (canReload(p)) {
+            const ButtonLook& l = p.crashed ? look::danger : look::dangerOutline;
+            row.placeRight(buttonWidth("Reload", l, len::lineButton, Icon::Reload, 12), px(len::lineButton));
+            if (button("Reload", l, len::lineButton, Icon::Reload, 12)) reload(p);
+        } else if (p.hasGui && !p.crashed) {
+            row.placeRight(buttonWidth("Editor", look::filled, len::lineButton, Icon::Editor, 12), px(len::lineButton));
+            if (button("Editor", look::filled, len::lineButton, Icon::Editor, 12))
+                runAsync("Opening the editor", [this, id = p.id] {
+                    std::string err;
+                    if (!engine_.setPluginGuiVisible(id, true, err)) error(err);
+                });
+        }
+        row.gapRight(10);
+    }
+
+    // The name of the plugin being renamed, edited in place on `line`.
+    void renameField(Row& line, const std::string& shown) {
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(px(8), px(5)));
+        line.place(px(240), ImGui::GetFrameHeight());
+        if (renameFocus_) {
+            ImGui::SetKeyboardFocusHere();
+            renameFocus_ = false;
+        }
+        ImGui::SetNextItemWidth(px(240));
+        const bool enter = ImGui::InputText("##rename", &renameBuf_, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        ImGui::PopStyleVar();
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            renaming_.clear();
+        } else if (enter || ImGui::IsItemDeactivated()) {
+            if (renameBuf_ != shown)
+                runAsync("Renaming " + shown, [this, id = renaming_, name = renameBuf_] {
+                    std::string err;
+                    if (!engine_.setPluginName(id, name, err)) error(err);
+                });
+            renaming_.clear();
+        }
+    }
+
     void pluginCard(size_t index) {
         const auto& p = snap_.plugins[index];
         ImGui::PushID(p.id.c_str());
@@ -699,7 +866,6 @@ private:
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const std::string shown = displayName(p);
         const float x0 = ImGui::GetCursorScreenPos().x, width = ImGui::GetContentRegionAvail().x - px(6);
-        const bool canReload = (p.crashed && p.separateProcess) || !p.loaded;
 
         Row line(28, width);
         if (renaming_ != p.id) {
@@ -722,25 +888,7 @@ private:
         drawIcon(dl, Icon::Grip, ImVec2(grip.x - px(2), grip.y + px(2)), px(24), col::faint);
         line.gap(10);
         if (renaming_ == p.id) {
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(px(8), px(5)));
-            line.place(px(240), ImGui::GetFrameHeight());
-            if (renameFocus_) {
-                ImGui::SetKeyboardFocusHere();
-                renameFocus_ = false;
-            }
-            ImGui::SetNextItemWidth(px(240));
-            const bool enter = ImGui::InputText("##rename", &renameBuf_, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
-            ImGui::PopStyleVar();
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                renaming_.clear();
-            } else if (enter || ImGui::IsItemDeactivated()) {
-                if (renameBuf_ != shown)
-                    runAsync("Renaming " + shown, [this, id = p.id, name = renameBuf_] {
-                        std::string err;
-                        if (!engine_.setPluginName(id, name, err)) error(err);
-                    });
-                renaming_.clear();
-            }
+            renameField(line, shown);
         } else {
             drawText(line.next(textWidth(fonts.bold, 15, shown), px(15)), fonts.bold, 15, col::text, shown);
         }
@@ -763,33 +911,9 @@ private:
         }
         line.gap(14);
 
-        line.placeRight(px(len::lineButton), px(len::lineButton));
-        if (button("##more", look::ghost, len::lineButton, Icon::More)) ImGui::OpenPopup("more");
-        if (beginPopupMenu("more")) {
-            if (ImGui::MenuItem("Rename")) startRename(p);
-            if (canReload && ImGui::MenuItem("Reload")) reload(p);
-            if (ImGui::MenuItem("Remove")) {
-                runAsync("Removing " + p.id, [this, id = p.id] {
-                    std::string err;
-                    if (!engine_.removePlugin(id, err)) error(err);
-                });
-            }
-            endPopupMenu();
-        }
-        line.gapRight(6);
-        if (canReload) {
-            const ButtonLook& l = p.crashed ? look::danger : look::dangerOutline;
-            line.placeRight(buttonWidth("Reload", l, len::lineButton, Icon::Reload, 12), px(len::lineButton));
-            if (button("Reload", l, len::lineButton, Icon::Reload, 12)) reload(p);
-        } else if (p.hasGui && !p.crashed) {
-            line.placeRight(buttonWidth("Editor", look::filled, len::lineButton, Icon::Editor, 12), px(len::lineButton));
-            if (button("Editor", look::filled, len::lineButton, Icon::Editor, 12))
-                runAsync("Opening the editor", [this, id = p.id] {
-                    std::string err;
-                    if (!engine_.setPluginGuiVisible(id, true, err)) error(err);
-                });
-        }
-        line.gapRight(10);
+        pluginButtons(line, p, [&] {
+            if (p.loaded && ImGui::MenuItem("Add effect...")) openAddDialog({true, p.id, p.architecture});
+        });
 
         // The status, clipped to the room left between the badges and the buttons.
         const ImVec2 s0(line.left(), line.top()), s1(line.left() + std::max(0.0f, line.remaining()), line.top() + line.height());
@@ -904,6 +1028,7 @@ private:
             none(row);
             row.end();
         }
+        effectRows(p.effects, p.id, p.architecture, bodyX, bodyW, p.loaded);
         if (changed) {
             runAsync("Routing", [this, id = p.id, mine] {
                 std::string err;
@@ -923,12 +1048,12 @@ private:
         });
     }
 
-    void chooseFile() {
+    void chooseFile(const AddTarget& target) {
         const std::string vst2 = std::string("*") + vst2Extension();
-        choose(openFileDialog("Plugin (*.clap, *.vst3, VST2 " + vst2 + ")", "*.clap;*.vst3;" + vst2), [this](const std::string& p) {
+        choose(openFileDialog("Plugin (*.clap, *.vst3, VST2 " + vst2 + ")", "*.clap;*.vst3;" + vst2), [this, target](const std::string& p) {
             PluginConfig pc;
             pc.path = pathToUtf8(bundleOf(pathFromUtf8(p)));
-            addPlugin(pc);
+            add(target, pc);
         });
     }
 
@@ -962,12 +1087,20 @@ private:
         return dropped;
     }
 
-    void addPlugin(const PluginConfig& pc) {
+    // An instrument, or an effect at the end of its chain.
+    void add(const AddTarget& target, const PluginConfig& pc) {
         std::string label = "Loading " + pathToUtf8(pathFromUtf8(pc.path).filename());
-        runAsync(label, [this, pc] {
+        runAsync(label, [this, target, pc] {
             std::string err;
-            if (engine_.addPlugin(pc, true, err).empty()) error(err);
+            const std::string id = target.effect ? engine_.addEffect(target.owner, SIZE_MAX, pc, err) : engine_.addPlugin(pc, true, err);
+            if (id.empty()) error(err);
         });
+    }
+
+    void openAddDialog(const AddTarget& target) {
+        if (target.effect != addTarget_.effect || target.architecture != addTarget_.architecture) addPick_.clear();
+        addTarget_ = target;
+        openAdd_ = true;
     }
 
     void sourcesCard() {
@@ -1671,7 +1804,7 @@ private:
 
     void addDialog() {
         if (openAdd_) {
-            ImGui::OpenPopup("Add instrument");
+            ImGui::OpenPopup("##add");
             openAdd_ = false;
         }
         const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1684,7 +1817,7 @@ private:
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(14));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-        const bool open = ImGui::BeginPopupModal("Add instrument", nullptr,
+        const bool open = ImGui::BeginPopupModal("##add", nullptr,
                                                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                                                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings);
         ImGui::PopStyleVar(3);
@@ -1704,7 +1837,14 @@ private:
         bool close = ImGui::IsKeyPressed(ImGuiKey_Escape);
         ImGui::SetCursorScreenPos(ImVec2(wp.x + px(len::edge), wp.y + px(12)));
         Row head(28, w - px(len::edge + 12));
-        drawText(head.next(textWidth(fonts.bold, 16, "Add instrument"), px(16)), fonts.bold, 16, col::text, "Add instrument");
+        const AddTarget& target = addTarget_;
+        std::string title = "Add instrument";
+        if (target.effect) {
+            title = "Add effect to the master";
+            for (auto& p : snap_.plugins)
+                if (p.id == target.owner) title = "Add effect to " + displayName(p);
+        }
+        drawText(head.next(textWidth(fonts.bold, 16, title), px(16)), fonts.bold, 16, col::text, title);
         head.placeRight(px(len::lineButton), px(len::lineButton));
         if (button("##close", look::ghost, len::lineButton, Icon::Close)) close = true;
         head.end(10);
@@ -1756,9 +1896,15 @@ private:
             for (char& c : s) c = (char)std::tolower((unsigned char)c);
             return s.find(query) != std::string::npos;
         };
+        // Instruments; or effects, of the chain's architecture.
+        auto fits = [&](const PluginDescription& d) {
+            return target.effect ? !d.isInstrument() && d.architecture == target.architecture : d.isInstrument();
+        };
         std::vector<const PluginDescription*> shown;
+        size_t candidates = 0;
+        for (auto& d : scanned_) candidates += fits(d);
         for (auto& d : scanned_)
-            if ((addFormat_ == 0 || d.format == formatOf[addFormat_]) && (query.empty() || contains(d.name) || contains(d.vendor)))
+            if (fits(d) && (addFormat_ == 0 || d.format == formatOf[addFormat_]) && (query.empty() || contains(d.name) || contains(d.vendor)))
                 shown.push_back(&d);
         auto keyOf = [](const PluginDescription& d) { return d.path + '\n' + d.id; };
         const PluginDescription* picked = nullptr;
@@ -1812,8 +1958,9 @@ private:
                          shortenPath(d.path, fonts.mono, 11, q.x - p.x - px(2 * padX)));
         }
         if (shown.empty()) {
-            const char* empty = scanned_.empty() && scanning_ ? "Scanning for instruments..."
-                                                              : "No instrument matches. Effects and unlisted plugins load with From file...";
+            const char* empty = scanned_.empty() && scanning_ ? "Scanning for plugins..."
+                                : target.effect ? "No effect matches. Unlisted plugins load with From file..."
+                                                : "No instrument matches. Unlisted plugins load with From file...";
             const ImVec2 p = ImGui::GetCursorScreenPos();
             drawText(ImVec2(p.x + (rw - textWidth(fonts.sans, 13, empty)) * 0.5f, p.y + px(32)), fonts.sans, 13, col::text3, empty);
             ImGui::Dummy(ImVec2(rw, px(80)));
@@ -1829,7 +1976,7 @@ private:
         foot.place(buttonWidth("From file...", look::outline, len::button, Icon::File), px(len::button));
         if (button("From file...", look::outline, len::button, Icon::File)) {
             close = true;
-            chooseFile();
+            chooseFile(target);
         }
         foot.gap(8);
         foot.place(px(len::button), px(len::button));
@@ -1839,7 +1986,8 @@ private:
         ImGui::SetItemTooltip(scanning_ ? "Scanning..." : "Rescan plugins");
         foot.gap(12);
         const std::string count = scanning_ ? std::string("Scanning...")
-                                            : std::to_string(shown.size()) + " of " + std::to_string(scanned_.size()) + " instruments";
+                                            : std::to_string(shown.size()) + " of " + std::to_string(candidates) +
+                                                  (target.effect ? " effects" : " instruments");
         drawText(foot.next(textWidth(fonts.sans, 12, count), px(12)), fonts.sans, 12, col::text3, count);
         foot.placeRight(buttonWidth("Add", look::primary, len::button), px(len::button));
         ImGui::BeginDisabled(!picked);
@@ -1854,7 +2002,7 @@ private:
             PluginConfig pc;
             pc.path = add->path;
             pc.pluginId = add->id;
-            addPlugin(pc);
+            this->add(target, pc);
             close = true;
         }
         if (close) ImGui::CloseCurrentPopup();
@@ -1946,11 +2094,12 @@ private:
     std::string renaming_, renameBuf_;  // plugin being renamed (id), and its edit buffer
     bool renameFocus_ = false;
 
-    // The "Add instrument" dialog
+    // The add dialog: instruments, or effects
     bool openAdd_ = false;
+    AddTarget addTarget_;
     std::string addQuery_;
     int addFormat_ = 0;    // "All", then one format
-    std::string addPick_;  // the instrument picked: its path and id
+    std::string addPick_;  // the plugin picked: its path and id
 
     // The "add MIDI input" kinds in segment order; newKind_ indexes this.
     static constexpr MidiSourceKind kNewKinds[] = {MidiSourceKind::Hardware, MidiSourceKind::Virtual, MidiSourceKind::Api};

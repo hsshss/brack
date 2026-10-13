@@ -29,7 +29,7 @@ static extern void CFRunLoopStop(nint loop);
 
 int RunTests()
 {
-    string synth = args[1];
+    string synth = args[1], gain = args[2];
     string log = Path.Combine(Path.GetTempPath(), $"brack_test_dotnet-{Environment.ProcessId}.log");
     // The test synth logs what it receives there, in the plugin host process. .NET keeps an environment of its
     // own on Unix: the C library's, which the plugin host inherits, is set too.
@@ -147,6 +147,7 @@ int RunTests()
             Architecture.Arm64 => "arm64",
             var other => other.ToString(),
         }, "plugin host process");
+        Check(BrackLibrary.Architecture == plugin.Architecture, "the library's architecture, the synth's");
         Check(plugin.NotePorts.Count == 1 && plugin.NotePorts[0].Midi && plugin.AudioOutputs[0].Channels == 2, "ports");
         Check(status.AudioRoutes.Count == 2 && status.AudioRoutes[1].Output == 1, "routed to outputs 1 and 2");
 
@@ -226,6 +227,34 @@ int RunTests()
         engine.LoadSessionJson(session);
         Check(engine.GetStatus().Plugins.Count == 2, "session restored");
         Throws(BrackErrorCode.Failed, () => engine.LoadSessionJson("{}"), "not a session");
+    }
+
+    // Effects: the test gain halves what comes to it, on an instrument and on the master.
+    using (var engine = new BrackEngine())
+    {
+        engine.StartManual(48000, 2, 256);
+        engine.AddPlugin(synth, id: "s");
+        engine.SendMidi("s", 0, [0x90, 69, 127]);
+        Peak(engine, 2400);
+        float dry = Peak(engine, 4800);
+        string fx = engine.AddEffect("s", 0, gain, "brack.test.gain");
+        engine.AddEffect(null, 0, gain, id: "m");
+        Peak(engine, 2400);
+        Check(Math.Abs(Peak(engine, 4800) - dry * 0.25f) < dry * 0.01f, "an effect and the master's");
+        engine.SetEffectBypass(fx, true);
+        EngineStatus status = engine.GetStatus();
+        Check(status.Plugins[0].Effects.Count == 1 && status.Plugins[0].Effects[0].Bypass && status.MasterEffects.Count == 1,
+              "effects in the status");
+        string file = Path.Combine(Path.GetTempPath(), $"brack_test_dotnet_session-{Environment.ProcessId}.json");
+        engine.SaveSession(file);
+        SessionContents described = BrackLibrary.DescribeSession(file);
+        File.Delete(file);
+        Check(described.Plugins is [{ Id: "s", Format: PluginFormat.Clap, Effects: [{ Bypass: true, Effects: [] }] }]
+              && described.MasterEffects is [{ Id: "m", Bypass: false }], "a session described without loading it");
+        Throws(BrackErrorCode.Failed, () => BrackLibrary.DescribeSession(file), "no session to describe");
+        Throws(BrackErrorCode.NotFound, () => engine.AddEffect("nope", 0, gain), "an effect for no instrument");
+        engine.RemovePlugin("s");
+        Check(engine.GetStatus().Plugins.Count == 0, "the instrument went with its effect");
     }
 
     // MIDI timed to the frame (the test synth logs frame offsets).

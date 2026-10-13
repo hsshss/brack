@@ -8,7 +8,7 @@ namespace Brack;
 public static unsafe class BrackLibrary
 {
     /// <summary>The C API version this binding was written against (BRACK_API_VERSION).</summary>
-    public const uint BindingApiVersion = 1;
+    public const uint BindingApiVersion = 2;
 
     private static readonly Lock s_lock = new();
     private static Action<BrackLogLevel, string>? s_log;
@@ -29,6 +29,15 @@ public static unsafe class BrackLibrary
 
     /// <summary>"Brack 1.0.0".</summary>
     public static string VersionString => Interop.Utf8(NativeMethods.brack_version_string()) ?? "";
+
+    /// <summary>The architecture brack.dll is built for ("x64", "x86", "arm64"): the master's effects must be too.</summary>
+    public static string Architecture => Interop.Utf8(NativeMethods.brack_architecture()) ?? "";
+
+    /// <summary>The session file's instruments and master's effects, read without loading it or any engine.</summary>
+    /// <exception cref="BrackException">It cannot be read, or is not a session.</exception>
+    public static SessionContents DescribeSession(string path) =>
+        BrackJson.Parse(Interop.ReadText((buf, size, needed) => NativeMethods.brack_describe_session(path, buf, size, needed)),
+                        BrackJson.Default.SessionContents);
 
     // brack.dll keeps the functions of older versions; a newer binding needs at least its own.
     internal static void CheckApiVersion()

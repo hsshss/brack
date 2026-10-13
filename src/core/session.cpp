@@ -6,6 +6,7 @@
 #include "engine.h"
 #include "engine_internal.h"
 #include "host_thread.h"
+#include "plugin/plugin_files.h"
 #include "util/common.h"
 #include "util/midi_queue.h"
 
@@ -33,18 +34,33 @@ std::string Engine::saveSessionJson() {
             sources.push_back({{"id", s->cfg.id}, {"kind", midiSourceKindName(s->cfg.kind)}, {"name", s->cfg.name}});
         j["midiSources"] = sources;
 
+        auto plugin = [](const PluginConfig& cfg, HostedPlugin* inst) {
+            json jp = {{"id", cfg.id}, {"path", cfg.path}, {"pluginId", cfg.pluginId}, {"name", cfg.name}};
+            std::vector<uint8_t> state;
+            if (inst) {
+                if (inst->saveState(state)) jp["state"] = base64Encode(state);
+            } else if (cfg.state) {
+                jp["state"] = base64Encode(*cfg.state);  // keep what we could not load
+            }
+            return jp;
+        };
+        auto effects = [&](const PluginSlot& s) {
+            json list = json::array();
+            for (auto& e : s.effects) {
+                json je = plugin(e.cfg, e.inst);
+                je["bypass"] = e.bypass;
+                list.push_back(je);
+            }
+            return list;
+        };
         json plugins = json::array();
         for (auto& p : plugins_) {
-            json jp = {{"id", p->cfg.id}, {"path", p->cfg.path}, {"pluginId", p->cfg.pluginId}, {"name", p->cfg.name}};
-            std::vector<uint8_t> state;
-            if (p->inst) {
-                if (p->inst->saveState(state)) jp["state"] = base64Encode(state);
-            } else if (p->cfg.state) {
-                jp["state"] = base64Encode(*p->cfg.state);  // keep what we could not load
-            }
+            json jp = plugin(p->cfg, p->instrument());
+            if (!p->effects.empty()) jp["effects"] = effects(*p);
             plugins.push_back(jp);
         }
         j["plugins"] = plugins;
+        if (!master_->effects.empty()) j["masterEffects"] = effects(*master_);
 
         json mr = json::array();
         for (auto& r : midiRoutes_) mr.push_back({{"source", r.source}, {"plugin", r.plugin}, {"notePort", r.notePort}});
@@ -65,14 +81,16 @@ void Engine::clear() {
             injectSources_.clear();
         }
         for (auto& s : sources_) s->port.reset();
+        for (PluginSlot* p : slots()) p->closeEditors();
         if (mode_ == EngineMode::Device) {  // see quiesceSlot() for manual mode
-            for (auto& p : plugins_)
-                if (p->inst && p->inst->isActive()) p->inst->requestStopProcessing();
-            for (auto& p : plugins_)
-                if (p->inst && p->inst->isActive())
-                    waitFor([&] { return p->inst->stopProcessingAcknowledged(); }, std::chrono::milliseconds(2000));
+            for (PluginSlot* p : slots())
+                if (p->chain && p->chain->isActive()) p->chain->requestStopProcessing();
+            for (PluginSlot* p : slots())
+                if (p->chain && p->chain->isActive())
+                    waitFor([&] { return p->chain->stopProcessingAcknowledged(); }, std::chrono::milliseconds(2000));
         }
         auto oldPlugins = std::move(plugins_);
+        auto oldMaster = std::exchange(master_, std::make_unique<PluginSlot>());
         auto oldSources = std::move(sources_);
         plugins_.clear();
         sources_.clear();
@@ -80,6 +98,7 @@ void Engine::clear() {
         audioRoutes_.clear();
         if (mode_ != EngineMode::Stopped) publishGraph();  // empty graph; waits for the audio thread
         oldPlugins.clear();
+        oldMaster.reset();
         oldSources.clear();
     });
     markChanged();
@@ -93,7 +112,12 @@ struct SessionData {
     EngineConfig config;
     float masterGain = 1.0f;
     std::vector<MidiSourceConfig> sources;
-    std::vector<PluginConfig> plugins;
+    struct Plugin {
+        PluginConfig cfg;
+        std::vector<Engine::EffectSlot> effects;
+    };
+    std::vector<Plugin> plugins;
+    std::vector<Engine::EffectSlot> masterEffects;
     std::vector<MidiRoute> midiRoutes;
     std::vector<AudioRoute> audioRoutes;
     std::vector<std::string> problems;  // entries skipped while reading; logged when applied
@@ -144,7 +168,7 @@ bool parseSession(const std::string& text, SessionData& out, std::string& error)
             }
             s.sources.push_back(std::move(sc));
         }
-        for (auto& jp : j.value("plugins", json::array())) {
+        auto plugin = [](const json& jp) {
             PluginConfig pc;
             pc.id = jp.value("id", "");
             pc.path = jp.value("path", "");
@@ -154,8 +178,21 @@ bool parseSession(const std::string& text, SessionData& out, std::string& error)
                 std::vector<uint8_t> st;
                 if (base64Decode(jp["state"].get<std::string>(), st)) pc.state = std::move(st);
             }
-            s.plugins.push_back(std::move(pc));
-        }
+            return pc;
+        };
+        auto effects = [&](const json& list) {
+            std::vector<Engine::EffectSlot> out;
+            for (auto& je : list) {
+                Engine::EffectSlot e;
+                e.cfg = plugin(je);
+                e.bypass = je.value("bypass", false);
+                out.push_back(std::move(e));
+            }
+            return out;
+        };
+        for (auto& jp : j.value("plugins", json::array()))
+            s.plugins.push_back({plugin(jp), effects(jp.value("effects", json::array()))});
+        s.masterEffects = effects(j.value("masterEffects", json::array()));
         for (auto& jr : j.value("midiRoutes", json::array()))
             s.midiRoutes.push_back({jr.value("source", ""), jr.value("plugin", ""), (uint16_t)jr.value("notePort", 0)});
         for (auto& jr : j.value("audioRoutes", json::array())) {
@@ -204,52 +241,71 @@ bool Engine::loadSessionJson(const std::string& text, std::string& error) {
         std::string err;
         if (addMidiSource(sc, err).empty()) warn(err);  // a missing port still adds the source
     }
-    // Made all at once, each in its own plugin host (those in this process one after another on
-    // the host thread), then put in the rack in the session's order: a plugin that takes long to
-    // load, or to take its state, no longer holds up the others. loadPluginsSerially makes them one
-    // after another instead.
+    // Chains made all at once, each in its own plugin host (those in this process one after
+    // another on the host thread), then put in the rack in the session's order: a plugin that
+    // takes long to load, or to take its state, does not hold up the others. loadPluginsSerially
+    // makes them one after another instead.
     struct Made {
-        std::unique_ptr<HostedPlugin> inst;
+        std::unique_ptr<PluginSlot> slot = std::make_unique<PluginSlot>();
         bool stateRejected = false;
         std::string error;
     };
     std::vector<Made> made(s.plugins.size());
     auto make = [&](size_t i) {
+        made[i].slot->cfg = s.plugins[i].cfg;
+        made[i].slot->effects = s.plugins[i].effects;
         try {
-            made[i].inst = makePlugin(s.plugins[i], made[i].stateRejected, made[i].error);
+            made[i].slot->chain = makeChain(*made[i].slot, made[i].stateRejected, made[i].error);
         } catch (const std::exception& e) {
-            made[i].error = s.plugins[i].path + ": " + e.what();
+            made[i].error = s.plugins[i].cfg.path + ": " + e.what();
         }
     };
-    // On the host thread, other threads would wait for it forever (makePlugin() asks it things).
+    // On the host thread, other threads would wait for it forever (makeChain() asks it things).
     if (host_->isCurrent() || s.config.loadPluginsSerially) {
         for (size_t i = 0; i < made.size(); ++i) make(i);
     } else {
         parallelFor(made.size(), make);
     }
     for (size_t i = 0; i < s.plugins.size(); ++i) {
-        const PluginConfig& pc = s.plugins[i];
+        const PluginConfig& pc = s.plugins[i].cfg;
+        std::unique_ptr<PluginSlot>& slot = made[i].slot;
         std::string err = made[i].error;
         std::string id;
-        if (made[i].inst)
-            host_->invoke([&] { id = installPlugin(pc, std::move(made[i].inst), made[i].stateRejected, false, err); });
+        for (auto& e : slot->effects)
+            if (!e.inst && slot->chain) warn(e.cfg.id + ": " + e.status);
+        if (slot->chain) host_->invoke([&] { id = installPlugin(std::move(slot), made[i].stateRejected, false, err); });
         if (id.empty()) {
             warn(pc.id + ": " + err);
-            // Keep the slot so the plugin (and its state) survives a save.
+            // Keep the slot so the plugin, its effects (and their states) survive a save.
             host_->invoke([&] {
-                if (pc.id.empty() || findPlugin(pc.id)) return;
-                auto slot = std::make_unique<PluginSlot>();
-                slot->cfg = pc;
-                slot->status = err;
-                plugins_.push_back(std::move(slot));
+                if (pc.id.empty() || findAny(pc.id)) return;
+                auto kept = std::make_unique<PluginSlot>();
+                kept->cfg = pc;
+                kept->effects = s.plugins[i].effects;
+                for (auto& e : kept->effects) e.status = "its instrument is not loaded";
+                assignIds(*kept);
+                kept->status = err;
+                plugins_.push_back(std::move(kept));
                 rebuildInjectionMaps();
             });
         }
     }
+    host_->invoke([&] {
+        master_->effects = s.masterEffects;
+        if (master_->effects.empty()) return;
+        assignIds(*master_);
+        if (std::string err; !reloadSlot(*master_, err)) warn("master: " + err);
+        for (auto& e : master_->effects) {
+            if (e.inst) continue;
+            if (!master_->chain) e.status = "the master's plugin host did not start";
+            warn(e.cfg.id + ": " + e.status);
+        }
+        settleSlot(*master_);
+    });
     for (auto& r : s.midiRoutes) {
         std::string err;
         bool known = false;
-        host_->invoke([&] { known = findPlugin(r.plugin) && findPlugin(r.plugin)->inst; });
+        host_->invoke([&] { known = findPlugin(r.plugin) && findPlugin(r.plugin)->instrument(); });
         if (!known) {
             host_->invoke([&] { midiRoutes_.push_back(r); });  // keep routes of unloaded plugins
             continue;
@@ -280,7 +336,9 @@ bool Engine::saveSessionFile(const std::string& pathUtf8, std::string& error) {
     return writeFileAtomic(pathFromUtf8(pathUtf8), saveSessionJson(), error);
 }
 
-bool Engine::loadSessionFile(const std::string& pathUtf8, std::string& error) {
+namespace {
+
+bool readSessionFile(const std::string& pathUtf8, std::string& text, std::string& error) {
     std::ifstream f(pathFromUtf8(pathUtf8), std::ios::binary);
     if (!f) {
         error = "cannot read " + pathUtf8;
@@ -288,7 +346,49 @@ bool Engine::loadSessionFile(const std::string& pathUtf8, std::string& error) {
     }
     std::stringstream ss;
     ss << f.rdbuf();
-    return loadSessionJson(ss.str(), error);
+    text = ss.str();
+    return true;
+}
+
+}  // namespace
+
+bool Engine::loadSessionFile(const std::string& pathUtf8, std::string& error) {
+    std::string text;
+    return readSessionFile(pathUtf8, text, error) && loadSessionJson(text, error);
+}
+
+bool Engine::describeSessionFile(const std::string& pathUtf8, std::string& out, std::string& error) {
+    std::string text;
+    SessionData s;
+    if (!readSessionFile(pathUtf8, text, error) || !parseSession(text, s, error)) return false;
+    auto plugin = [](const PluginConfig& cfg) {
+        PluginFormat format = PluginFormat::Clap;  // an unknown one, as brack_get_status has it
+        pluginFormatFromPath(pathFromUtf8(cfg.path), format);
+        return json{{"id", cfg.id},
+                    {"name", cfg.name},
+                    {"format", pluginFormatName(format)},
+                    {"path", cfg.path},
+                    {"pluginId", cfg.pluginId}};
+    };
+    auto effects = [&](const std::vector<EffectSlot>& list) {
+        json a = json::array();
+        for (auto& e : list) {
+            json je = plugin(e.cfg);
+            je["bypass"] = e.bypass;
+            je["effects"] = json::array();
+            a.push_back(je);
+        }
+        return a;
+    };
+    json plugins = json::array();
+    for (auto& p : s.plugins) {
+        json jp = plugin(p.cfg);
+        jp["bypass"] = false;
+        jp["effects"] = effects(p.effects);
+        plugins.push_back(jp);
+    }
+    out = json{{"plugins", plugins}, {"masterEffects", effects(s.masterEffects)}}.dump(2);
+    return true;
 }
 
 }  // namespace brack

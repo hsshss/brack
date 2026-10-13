@@ -302,6 +302,36 @@ bool toggleSwitch(const char* id, bool& on) {
     return clicked;
 }
 
+namespace {
+constexpr float kCheckBox = 16, kCheckGap = 6;
+}  // namespace
+
+float checkboxWidth(const char* label, float fontSize) {
+    const std::string_view text(label, size_t(ImGui::FindRenderedTextEnd(label) - label));
+    return text.empty() ? px(kCheckBox) : px(kCheckBox + kCheckGap) + textWidth(fonts.sans, fontSize, text);
+}
+
+bool checkbox(const char* label, bool& on, float height, float fontSize) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = px(height);
+    const bool clicked = ImGui::InvisibleButton(label, ImVec2(checkboxWidth(label, fontSize), h));
+    if (clicked) on = !on;
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 b(p.x, p.y + (h - px(kCheckBox)) * 0.5f), c(b.x + px(kCheckBox), b.y + px(kCheckBox));
+    if (on) {
+        dl->AddRectFilled(b, c, tint(col::midi), px(4));
+        drawIcon(dl, Icon::Check, ImVec2(b.x + px(2), b.y + px(2)), px(12), col::onMidi);
+    } else {
+        if (hovered) dl->AddRectFilled(b, c, tint(col::raised), px(4));
+        dl->AddRect(b, c, tint(col::borderStrong), px(4));
+    }
+    const std::string_view text(label, size_t(ImGui::FindRenderedTextEnd(label) - label));
+    if (!text.empty())
+        drawText(ImVec2(c.x + px(kCheckGap), p.y + (h - px(fontSize)) * 0.5f), fonts.sans, fontSize, hovered ? col::text : col::text2, text);
+    return clicked;
+}
+
 ImVec2 badgeSize(std::string_view s, ImFont* font, float size, float padX) {
     return ImVec2(textWidth(font, size, s) + 2 * px(padX), std::round(px(size * 1.4f)));
 }

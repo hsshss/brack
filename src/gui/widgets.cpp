@@ -154,6 +154,13 @@ ImVec2 Row::nextRight(float w, float h) {
     return ImVec2(right_, origin_.y + std::floor((height_ - h) * 0.5f));
 }
 
+bool rowText(Row& row, ImFont* font, float size, ImU32 col, std::string_view s) {
+    const float w = textWidth(font, size, s);
+    const ImVec2 at = row.next(w, px(size));
+    drawText(at, font, size, col, s);
+    return ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(at, ImVec2(at.x + w, at.y + px(size)));
+}
+
 // The line and the gap below it as one item, so that the window's extent ends with an item
 // rather than a cursor move (which ImGui reports as an error).
 void Row::end(float gapBelow) {

@@ -495,17 +495,19 @@ private:
         drawText(ImVec2(vp.x + px(kDbValueWidth) - textWidth(fonts.mono, 12, value), vp.y), fonts.mono, 12, col::text, value);
         ImGui::PopStyleVar();
 
-        if (running && !snap_.outputPeaks.empty()) {
+        if (running && !snap_.output.empty()) {
             row.gap(20);
             const float w = std::min(px(260), row.remaining());
-            meters(row.next(w, px(controls)), w, px(controls));
+            meters(snap_.output, clipsSeen("output", snap_.output), 0, snap_.output.size(), row.next(w, px(controls)), w,
+                   px(controls));
         }
         row.end(6);
 
         Row status(18, ww - 2 * px(len::edge));
         auto item = [&](const std::string& s, ImFont* f, ImU32 c) {
-            drawText(status.next(textWidth(f, 12, s), px(12)), f, 12, c, s);
+            const bool hovered = rowText(status, f, 12, c, s);
             status.gap(16);
+            return hovered;
         };
         if (running) {
             item(snap_.deviceName, fonts.sans, col::text);
@@ -514,9 +516,14 @@ private:
                 item("plugins " + khz(snap_.processSampleRate) + " · SRC " + resamplerQualityName(snap_.config.resamplerQuality) + " · " +
                          std::to_string((int)std::lround(snap_.resamplerLatencyMs)) + " ms",
                      fonts.mono, col::text2);
-            char cpu[32];
-            std::snprintf(cpu, sizeof cpu, "CPU %.1f%%", snap_.cpuLoad * 100.0f);
-            item(cpu, fonts.mono, col::text2);
+            if (item(loadText(snap_.load), fonts.mono, col::text2))
+                ImGui::SetTooltip("Time to render a buffer, against how long it lasts: on average, and the most in the last second");
+            if (snap_.overruns) {
+                const std::string overruns = std::to_string(snap_.overruns) + (snap_.overruns == 1 ? " overrun" : " overruns");
+                if (item(overruns, fonts.mono, col::warn))
+                    ImGui::SetTooltip("Buffers since the audio device was opened that took longer to render than they last.\n"
+                                      "Each can be a dropout.");
+            }
         } else {
             item("Audio stopped", fonts.sans, col::text3);
         }
@@ -528,6 +535,11 @@ private:
     static std::string khz(uint32_t hz) {
         char s[32];
         std::snprintf(s, sizeof s, "%g kHz", hz / 1000.0);
+        return s;
+    }
+    static std::string loadText(const EngineSnapshot::Load& l) {
+        char s[48];
+        std::snprintf(s, sizeof s, "CPU %.1f%% (max %.1f%%)", l.average * 100.0f, l.peak * 100.0f);
         return s;
     }
 
@@ -549,23 +561,49 @@ private:
         return db;
     }
 
-    // One bar per output channel (up to 8) in a box w x h; numbered while there is room.
-    void meters(ImVec2 p, float w, float h) {
+    // `key`'s meters' clip counts when one of them was last clicked, for meters().
+    std::vector<uint64_t>& clipsSeen(const std::string& key, const std::vector<EngineSnapshot::Level>& levels) {
+        std::vector<uint64_t>& seen = clipSeen_[key];
+        seen.resize(levels.size());
+        for (size_t c = 0; c < levels.size(); ++c)
+            if (levels[c].clips < seen[c]) seen[c] = 0;  // a new meter (a plugin added again)
+        return seen;
+    }
+
+    // One bar for each of `count` channels of `levels` from `first` (up to 8) in a box w x h,
+    // numbered while there is room. A bar's square lights while its channel has gone past full
+    // scale since a meter sharing `seen` (clipsSeen()) was clicked; a click clears all of `levels`.
+    void meters(const std::vector<EngineSnapshot::Level>& levels, std::vector<uint64_t>& seen, size_t first, size_t count,
+                ImVec2 p, float w, float h) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        const size_t n = std::min<size_t>(snap_.outputPeaks.size(), 8);
+        const size_t n = std::min<size_t>({count, levels.size() - std::min(first, levels.size()), 8});
+        if (n == 0) return;
+
         const float pitch = std::min(px(10), h / n), bar = std::max(1.0f, std::round(pitch * 0.6f));
-        const bool numbered = n <= 4;
-        const float x0 = p.x + (numbered ? px(18) : 0), top = p.y + (h - pitch * n) * 0.5f;
+        const bool numbered = n > 1 && n <= 4;
+        const float x0 = p.x + (numbered ? px(18) : 0), x1 = p.x + w - bar - px(3), top = p.y + (h - pitch * n) * 0.5f;
+        uint64_t past = 0;  // the most of any channel since the click
         for (size_t c = 0; c < n; ++c) {
+            const EngineSnapshot::Level& l = levels[first + c];
             const float y = std::round(top + c * pitch + (pitch - bar) * 0.5f);
             if (numbered)
                 drawText(ImVec2(p.x, y + (bar - px(10)) * 0.5f), fonts.mono, 10, col::text3, std::to_string(c + 1));
-            const float db = 20.0f * std::log10(std::max(snap_.outputPeaks[c], 1e-6f));
+            const float db = 20.0f * std::log10(std::max(l.peak, 1e-6f));
             const float v = std::clamp((db + 60.0f) / 60.0f, 0.0f, 1.0f);
-            dl->AddRectFilled(ImVec2(x0, y), ImVec2(p.x + w, y + bar), col::raised, bar * 0.5f);
+            dl->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + bar), col::raised, bar * 0.5f);
             if (v > 0)
-                dl->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + (p.x + w - x0) * v, y + bar), db > -0.5f ? col::clip : col::audio, bar * 0.5f);
+                dl->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + (x1 - x0) * v, y + bar), db > -0.5f ? col::clip : col::audio, bar * 0.5f);
+            const uint64_t since = l.clips - seen[first + c];
+            dl->AddRectFilled(ImVec2(p.x + w - bar, y), ImVec2(p.x + w, y + bar), since ? col::clip : col::raised, px(1));
+            past = std::max(past, since);
         }
+        ImGui::SetCursorScreenPos(p);
+        ImGui::PushID(&seen);
+        if (ImGui::InvisibleButton("##meter", ImVec2(w, h)))
+            for (size_t c = 0; c < levels.size(); ++c) seen[c] = levels[c].clips;
+        ImGui::PopID();
+        if (past && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Past full scale %llu times (click to clear)", (unsigned long long)past);
     }
 
     void banners() {
@@ -674,6 +712,27 @@ private:
         {
             constexpr float indent = 30;  // as an instrument's body
             const float x = ImGui::GetCursorScreenPos().x + px(indent), width = ImGui::GetContentRegionAvail().x - px(6 + indent);
+            // The mix's level before the effects and after; one, if there are none.
+            auto level = [&](const char* label, const std::vector<EngineSnapshot::Level>& levels, const char* key, bool load,
+                             float below) {
+                ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
+                Row row(26, width);
+                drawText(row.next(px(72), px(11)), fonts.bold, 11, col::text3, label);
+                row.gap(8);
+                const float w = std::min(px(260), row.remaining());
+                meters(levels, clipsSeen(key, levels), 0, levels.size(), row.next(w, row.height()), w, row.height());
+                row.gap(14);
+                if (load && rowText(row, fonts.sans, 12, col::text2, loadText(snap_.masterLoad)))
+                    ImGui::SetTooltip("The master's effects: the time they take to process a block, against how\n"
+                                      "long the block lasts, on average and the most in the last second");
+                row.end(below);
+            };
+            if (!snap_.masterInput.empty() && !snap_.masterEffects.empty()) {
+                level("IN", snap_.masterInput, "masterInput", false, 0);
+                level("OUT", snap_.masterOutput, "masterOutput", true, 4);
+            } else if (!snap_.masterInput.empty()) {
+                level("LEVEL", snap_.masterInput, "masterInput", false, 4);
+            }
             effectRows(snap_.masterEffects, "", buildArchitecture(), x, width);
         }
         endCard();
@@ -933,11 +992,23 @@ private:
             drawText(line.next(textWidth(fonts.sans, 12, what), px(12)), fonts.sans, 12, col::error, what);
             if (statusHovered) ImGui::SetTooltip("%s", p.status.c_str());
         } else {
-            const ImVec2 d = line.next(px(6), px(6));
-            dl->AddCircleFilled(ImVec2(d.x + px(3), d.y + px(3)), px(3), tint(p.active ? col::audio : col::faint));
-            line.gap(6);
-            const std::string what = std::string(p.active ? "Active" : "Idle") + (p.latency ? " · latency " + std::to_string(p.latency) : "");
-            drawText(line.next(textWidth(fonts.sans, 12, what), px(12)), fonts.sans, 12, col::text2, what);
+            // Text, after a dot unless `dot` is 0; whether the mouse is on the text.
+            auto dotted = [&](ImU32 dot, const std::string& what) {
+                if (dot) {
+                    const ImVec2 d = line.next(px(6), px(6));
+                    dl->AddCircleFilled(ImVec2(d.x + px(3), d.y + px(3)), px(3), tint(dot));
+                    line.gap(6);
+                }
+                return rowText(line, fonts.sans, 12, col::text2, what);
+            };
+            if (dotted(receiving("plugin/" + p.id, p.midiMessages) ? col::midi : col::faint, "MIDI"))
+                ImGui::SetTooltip("%llu MIDI messages received", (unsigned long long)p.midiMessages);
+            line.gap(12);
+            dotted(p.active ? col::audio : col::faint,
+                   std::string(p.active ? "Active" : "Idle") + (p.latency ? " · latency " + std::to_string(p.latency) : ""));
+            if (p.active && dotted(0, " · " + loadText(p.load)))
+                ImGui::SetTooltip("This instrument's chain (the instrument and its effects): the time it takes to process a\n"
+                                  "block, against how long the block lasts, on average and the most in the last second");
         }
         ImGui::PopClipRect();
         line.end(2);
@@ -973,12 +1044,23 @@ private:
             any = true;
         }
         if (!any) none(midi);
-        midi.end();
+        midi.end(4);
 
         std::vector<AudioRoute> mine = routesOf(p.id);
-        bool changed = false, first = true;
+        std::vector<std::string> labels;  // each channel's, in p.outputLevels' order
+        float lw = px(48);                // the widest label's, so that the meters line up
         for (uint32_t port = 0; port < p.audioOutputs.size(); ++port) {
             for (uint32_t ch = 0; ch < p.audioOutputs[port].channels; ++ch) {
+                auto it = findRoute(mine, port, ch);
+                labels.push_back(channelLabel(p, port, ch) + " → " + (it != mine.end() ? std::to_string(it->output + 1) : "off"));
+                lw = std::max(lw, textWidth(fonts.mono, 12, labels.back()));
+            }
+        }
+        std::vector<uint64_t>& seen = clipsSeen("plugin/" + p.id, p.outputLevels);
+        bool changed = false, first = true;
+        size_t level = 0;  // in p.outputLevels
+        for (uint32_t port = 0; port < p.audioOutputs.size(); ++port) {
+            for (uint32_t ch = 0; ch < p.audioOutputs[port].channels; ++ch, ++level) {
                 const std::string key = p.id + "/" + std::to_string(port) + "/" + std::to_string(ch);
                 ImGui::PushID(key.c_str());
                 Row row = bodyRow(px(480));
@@ -986,12 +1068,14 @@ private:
                 first = false;
                 auto it = findRoute(mine, port, ch);
                 const bool routed = it != mine.end();
-                const std::string label = channelLabel(p, port, ch) + " → " + (routed ? std::to_string(it->output + 1) : "off");
-                const float lw = std::max(px(48), textWidth(fonts.mono, 12, label));
+                const std::string& label = labels[level];
                 const ImVec2 lp = row.next(lw, px(12));
                 drawText(lp, fonts.mono, 12, routed ? col::audioText : col::text3, label);
                 if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(lp, ImVec2(lp.x + lw, lp.y + px(12))))
                     ImGui::SetTooltip("%s, channel %u", p.audioOutputs[port].name.c_str(), ch + 1);
+                row.gap(8);
+                const ImVec2 mp = row.next(px(64), row.height());
+                meters(p.outputLevels, seen, level, 1, mp, px(64), row.height());
                 row.gap(8);
                 if (routed) {
                     // While dragging, and until the snapshot catches up (a frame or more later),
@@ -1061,12 +1145,13 @@ private:
     // API sources have no port; their id is what callers address them by.
     static std::string sourceName(const EngineSnapshot::Source& s) { return s.name.empty() ? s.id : s.name; }
 
-    // Whether the source has had messages in the last 0.15 s: its dots light up while it does.
-    bool receiving(const EngineSnapshot::Source& s) {
-        auto& last = activity_[s.id];
-        if (s.messages != last.first) last = {s.messages, ImGui::GetTime()};
+    // Whether a count of MIDI messages (`key`'s) went up in the last 0.15 s: dots light up while it does.
+    bool receiving(const std::string& key, uint64_t messages) {
+        auto& last = activity_[key];
+        if (messages != last.first) last = {messages, ImGui::GetTime()};
         return ImGui::GetTime() - last.second < 0.15;
     }
+    bool receiving(const EngineSnapshot::Source& s) { return receiving("source/" + s.id, s.messages); }
     // Call right after a list row's item: makes it a drag source (carrying `id`) and a
     // drop target. Returns true, with the dragged id in `from`, when another row of the
     // same `type` was dropped here; the caller then moves it to this row's index.
@@ -2109,7 +2194,8 @@ private:
     std::string gainKey_;  // route gain fader being dragged ("plugin/port/channel")
     float gainDb_ = 0;
     double gainEditTime_ = 0;
-    std::map<std::string, std::pair<uint64_t, double>> activity_;
+    std::map<std::string, std::pair<uint64_t, double>> activity_;  // see receiving()
+    std::map<std::string, std::vector<uint64_t>> clipSeen_;        // a meter's clips when last clicked (meters())
     double copiedAt_ = -10;  // when the log was copied
     float matrixHeight_ = 0;  // the MIDI matrix's height last frame
 

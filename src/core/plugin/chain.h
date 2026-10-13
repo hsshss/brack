@@ -65,7 +65,7 @@ public:
 
     // ---- audio thread ----
     // MIDI for the instrument (see PluginInstance::appendMidi).
-    virtual void appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+    virtual bool appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
                             uint32_t time) const = 0;
     // Processes `frames` frames, in two steps so that chains in other processes run side by side:
     // beginProcess() for every chain of the block, then endProcess() for each, which returns false
@@ -74,6 +74,9 @@ public:
     virtual void beginProcess(uint32_t frames, uint64_t steadyTime, const InputEventList& in,
                               const float* const* input) = 0;
     virtual bool endProcess() = 0;
+    // How long the last endProcess() spent processing, timed where the plugins run (design notes,
+    // "制御ブロック").
+    virtual uint32_t processNs() const = 0;
     // The instrument's output ports, the bus in place of its main one; the master's port 0 is the bus.
     virtual const float* outputChannel(uint32_t port, uint32_t channel) const = 0;
 };
@@ -112,11 +115,12 @@ public:
     int crashedPlugin() const override;
     std::string crashReport() const override;
 
-    void appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+    bool appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
                     uint32_t time) const override;
     void beginProcess(uint32_t frames, uint64_t steadyTime, const InputEventList& in,
                       const float* const* input) override;
     bool endProcess() override;
+    uint32_t processNs() const override { return processNs_; }
     const float* outputChannel(uint32_t port, uint32_t channel) const override;
     uint32_t outputPorts() const;  // how many outputChannel() has
     uint32_t outputChannels(uint32_t port) const;
@@ -129,6 +133,7 @@ private:
     };
     size_t firstEffect() const { return hasInstrument_ ? 1 : 0; }
     bool activateEffect(PluginInstance& p, std::string& error);
+    bool process();  // endProcess()'s work
 
     HostThread& host_;
     PluginHostListener& listener_;
@@ -150,6 +155,7 @@ private:
     const InputEventList* pendingIn_ = nullptr;
     const float* const* pendingInput_ = nullptr;
     InputEventList noEvents_{1, 0};
+    uint32_t processNs_ = 0;
 };
 
 }  // namespace brack

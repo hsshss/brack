@@ -363,6 +363,76 @@ void midiWhileChanging(const std::string& synth, const std::string& gain) {
     CHECK(peak > 0.01f);
 }
 
+// Meters: what an instrument's chain puts out, routed or not; past full scale; the mix before and
+// after the master's chain; each chain's load, timed in a plugin host too; the MIDI an instrument took;
+// zero once unwritten for a while.
+void meters(const std::string& synth, const std::string& gain) {
+    for (bool inProcess : {true, false}) {
+        std::printf("meters %s\n", inProcess ? "in this process" : "in plugin host processes");
+        Engine e;
+        std::string err;
+        EngineConfig cfg;
+        cfg.pluginsInProcess = inProcess;
+        CHECK(e.setConfig(cfg, err));
+        CHECK(e.startManual(48000, 2, 256, err));
+        CHECK(e.addPlugin({"s", synth, "brack.test.synth", "", std::nullopt}, true, err) == "s");
+        CHECK(e.setAudioRoutes("s", {{"s", 0, 0, 0, 1.0f}}, err));  // R is not routed
+        CHECK(e.addMidiSource({"keys", MidiSourceKind::Api, ""}, err) == "keys");
+        CHECK(e.addMidiRoute({"keys", "s", 0}, err));
+        const uint8_t on[] = {0x90, 0x3C, 0x64}, cc[] = {0xB0, 0x07, 0x7F};
+        CHECK(e.sendMidiToSource("keys", on, 3) == MidiSend::Sent);
+        CHECK(e.sendMidiToPlugin("s", 0, cc, 3) == MidiSend::Sent);
+        CHECK(e.sendMidiToPlugin("s", 0, cc, 3) == MidiSend::Sent);
+        CHECK(e.sendMidiToPlugin("s", 1, cc, 3) == MidiSend::Sent);  // it has no port 1: dropped, not counted
+        settledPeaks(e, 4800);
+
+        EngineSnapshot snap = e.snapshot();
+        const EngineSnapshot::Plugin& s = snap.plugins[0];
+        std::printf("  instrument L %.3f R %.3f, load %.4f (max %.4f), %llu MIDI messages\n", s.outputLevels[0].peak,
+                    s.outputLevels[1].peak, s.load.average, s.load.peak, (unsigned long long)s.midiMessages);
+        CHECK(s.outputLevels.size() == 2 && s.outputLevels[0].peak > 0.1f && about(s.outputLevels[1].peak, s.outputLevels[0].peak));
+        CHECK(s.outputLevels[0].clips == 0 && s.outputLevels[1].clips == 0);
+        CHECK(s.load.average > 0 && s.load.peak > 0);
+        CHECK(s.midiMessages == 3);
+        CHECK(snap.load.average > 0);
+        CHECK(snap.output.size() == 2 && snap.output[0].peak > 0.1f && snap.output[1].peak == 0);
+        CHECK(snap.masterInput.size() == 2 && about(snap.masterInput[0].peak, s.outputLevels[0].peak));
+        e.refreshSnapshot();
+        CHECK(e.cachedSnapshot().plugins[0].midiMessages == 3);
+
+        // Past full scale, in the chain: before the routes' gains, which bring it back under.
+        CHECK(e.addEffect("s", 0, {"g", gain, "brack.test.gain", "", std::nullopt}, err) == "g");
+        CHECK(e.setPluginState("g", gainState(8.0f), err));
+        CHECK(e.setAudioRoutes("s", {{"s", 0, 0, 0, 0.25f}}, err));
+        settledPeaks(e, 4800);
+        snap = e.snapshot();
+        const uint64_t clips = snap.plugins[0].outputLevels[0].clips;
+        std::printf("  through 8x: %.3f, %llu blocks past full scale; the mix %.3f\n", snap.plugins[0].outputLevels[0].peak,
+                    (unsigned long long)clips, snap.masterInput[0].peak);
+        CHECK(snap.plugins[0].outputLevels[0].peak > 1.0f && clips > 0);
+        CHECK(snap.masterInput[0].peak < 1.0f && snap.masterInput[0].clips == 0);
+        settledPeaks(e, 4800);
+        CHECK(e.snapshot().plugins[0].outputLevels[0].clips > clips);
+
+        // The master's effect halves the mix: its input and output.
+        CHECK(e.addEffect("", 0, {"mg", gain, "brack.test.gain", "", std::nullopt}, err) == "mg");
+        settledPeaks(e, 4800);
+        snap = e.snapshot();
+        std::printf("  master in %.3f out %.3f, load %.4f\n", snap.masterInput[0].peak, snap.masterOutput[0].peak,
+                    snap.masterLoad.average);
+        CHECK(snap.masterInput[0].peak > 0.1f && about(snap.masterOutput[0].peak, snap.masterInput[0].peak * 0.5f));
+        CHECK(snap.masterLoad.average > 0);
+
+        // Nothing rendered for longer than kMeterStaleNs: levels and loads read 0, the clips stay.
+        std::this_thread::sleep_for(std::chrono::nanoseconds(kMeterStaleNs) + std::chrono::milliseconds(50));
+        snap = e.snapshot();
+        const EngineSnapshot::Plugin& idle = snap.plugins[0];
+        CHECK(idle.outputLevels[0].peak == 0 && idle.load.average == 0 && idle.load.peak == 0);
+        CHECK(snap.output[0].peak == 0 && snap.masterOutput[0].peak == 0 && snap.load.average == 0 && snap.masterLoad.peak == 0);
+        CHECK(idle.outputLevels[0].clips > clips);
+    }
+}
+
 }  // namespace
 
 int run(int argc, char** argv) {
@@ -563,6 +633,7 @@ int run(int argc, char** argv) {
     editWhilePlaying(synth, argv[2]);
     effectLoadsAside(synth, argv[2]);
     midiWhileChanging(synth, argv[2]);
+    meters(synth, argv[2]);
 
     std::printf(g_failures ? "FAILED (%d)\n" : "PASS\n", g_failures);
     return g_failures ? 1 : 0;

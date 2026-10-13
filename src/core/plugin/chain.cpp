@@ -1,6 +1,8 @@
 #include "plugin/chain.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 
@@ -131,9 +133,9 @@ std::string LocalChain::crashReport() const {
     return i < 0 ? std::string() : plugins_[(size_t)i].instance->crashReport();
 }
 
-void LocalChain::appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+bool LocalChain::appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
                             uint32_t time) const {
-    if (hasInstrument_) plugins_[0].instance->appendMidi(list, port, data, size, time);
+    return hasInstrument_ && plugins_[0].instance->appendMidi(list, port, data, size, time);
 }
 
 void LocalChain::beginProcess(uint32_t frames, uint64_t steadyTime, const InputEventList& in,
@@ -145,6 +147,14 @@ void LocalChain::beginProcess(uint32_t frames, uint64_t steadyTime, const InputE
 }
 
 bool LocalChain::endProcess() {
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = process();
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+    processNs_ = (uint32_t)std::min<int64_t>(ns, UINT32_MAX);
+    return ok;
+}
+
+bool LocalChain::process() {
     const InputEventList* in = std::exchange(pendingIn_, nullptr);
     if (!in || !active_) return false;
     const uint32_t frames = std::min(pendingFrames_, maxFrames_);

@@ -7,6 +7,7 @@
 
 #include "engine.h"
 #include "midi/midi_input.h"
+#include "util/meters.h"
 #include "util/midi_queue.h"
 #include "util/pending_midi.h"
 
@@ -29,6 +30,8 @@ struct Engine::PluginSlot {
     // Direct messages not yet due, and its sources' while its chain changes.
     std::unique_ptr<PendingMidi> pending = std::make_unique<PendingMidi>();
     std::unique_ptr<InputEventList> events = std::make_unique<InputEventList>();
+    // Shared: a cached snapshot reads them after the slot is gone. The master's has only `load`.
+    std::shared_ptr<ChainMeters> meters = std::make_shared<ChainMeters>();
     std::string status;
     // Host thread: EngineEvent::PluginCrashed sent for the chain's crash; cleared once the chain is
     // gone or no longer crashed.
@@ -80,12 +83,14 @@ struct Engine::RtGraph {
         MidiQueue* direct;
         PendingMidi* pending;
         InputEventList* events;
+        ChainMeters* meters;
         bool holdMidi;  // its chain changes: its MIDI waits in `pending` and `direct`
+        std::vector<uint32_t> portChannels;  // how many channels each of the instrument's output ports has
         std::vector<Out> outs;
     };
-    struct Target {
+    struct Target {  // one for each node, so that a message counts once
         uint32_t node;
-        uint16_t port;
+        std::vector<uint16_t> ports;
     };
     struct Source {
         MidiQueue* queue;
@@ -95,6 +100,7 @@ struct Engine::RtGraph {
     std::vector<Node> nodes;
     std::vector<Source> sources;
     HostedChain* master = nullptr;  // processes the mix
+    ChainMeters* masterMeters = nullptr;
     // The master's chain is out while it changes: silent, not the mix without it.
     bool muteMix = false;
 };

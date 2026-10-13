@@ -131,7 +131,8 @@ int waitForQuit(Engine& engine) {
     while (!g_quit && (!g_durationSec || std::chrono::steady_clock::now() < end))
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     auto s = engine.snapshot();
-    std::printf("stopping... (CPU %.1f%%)\n", s.cpuLoad * 100.0f);
+    std::printf("stopping... (CPU %.1f%%, max %.1f%%, %llu overruns)\n", s.load.average * 100.0f, s.load.peak * 100.0f,
+                (unsigned long long)s.overruns);
     engine.stop();
     return 0;
 }

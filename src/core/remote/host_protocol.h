@@ -10,8 +10,8 @@
 //                  time (a log line, an editor closed or resized, a restart wanted, which plugins
 //                  failed to process).
 //   control block  shared memory Brack creates with the process: one block's MIDI in, the
-//                  result out, a count of the plugins' state changes, and the record of a
-//                  crash, which the host writes just before it ends itself.
+//                  result and the time it took out, a count of the plugins' state changes, and
+//                  the record of a crash, which the host writes just before it ends itself.
 //   channels       shared memory the host creates at each activation, maxFrames samples a
 //                  channel: the master's bus in (none for a chain with an instrument), then the
 //                  chain's output channels, port by port.
@@ -77,6 +77,7 @@ struct ControlBlock {
     uint32_t eventCount;
     // host -> Brack, before "done"
     uint32_t result;
+    uint32_t processNs;  // HostedChain::processNs()
     // Goes up whenever a plugin says its state changed, from any of its threads (atomically:
     // std::atomic_ref). Brack looks after each block and each request.
     uint32_t stateChanges;
@@ -90,7 +91,7 @@ struct ControlBlock {
     MidiEvent events[kMaxEvents];
     uint8_t sysex[kSysexBytes];
 };
-static_assert(sizeof(ControlBlock) == 328752, "the same layout in 32-bit and 64-bit builds");
+static_assert(sizeof(ControlBlock) == 328760, "the same layout in 32-bit and 64-bit builds");
 
 using Message = nlohmann::json;
 

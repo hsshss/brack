@@ -329,8 +329,12 @@ BRACK_API int BRACK_CALL brack_set_event_notify(brack_engine* e, brack_event_not
 /* ---- inspection (JSON) ----
  * brack_get_status: engine state, plugins (with note/audio ports, and the architecture they run
  * as and whether in a plugin host process; each instrument with its "effects"), the master's
- * "masterEffects", sources, routes. Waits for Brack's thread, which may be busy (loading a plugin,
- * say).
+ * "masterEffects", sources, routes. Meters, the engine's and each instrument's: levels as "...Peaks"
+ * with "...Clips" (blocks past full scale), an instrument's per port in "audioOutputs" ("peaks",
+ * "clips"; the "main" port's after its effects); loads as the time to process against the time it
+ * lasts. Clips and "midiMessages" never go down: they count from the engine's start, an
+ * instrument's from when it was added.
+ * Waits for Brack's thread, which may be busy (loading a plugin, say).
  * brack_get_status_cached: the same, as of at most ~50 ms ago (meters current), without waiting.
  * brack_list_audio_devices / brack_list_midi_inputs / brack_scan_plugins: arrays. */
 BRACK_API int BRACK_CALL brack_get_status(brack_engine* e, char* buf, size_t size, size_t* needed);

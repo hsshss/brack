@@ -29,32 +29,65 @@ std::string snapshotToJson(const EngineSnapshot& s) {
     j["resamplerQuality"] = resamplerQualityName(s.config.resamplerQuality);
     j["resamplerLatencyMs"] = s.resamplerLatencyMs;
     j["masterGain"] = s.masterGain;
-    j["cpuLoad"] = s.cpuLoad;
-    j["outputPeaks"] = s.outputPeaks;
-    auto plugin = [](const EngineSnapshot::Plugin& p) {
+    auto levels = [&](json& to, const char* name, const std::vector<EngineSnapshot::Level>& list) {
+        json peaks = json::array(), clips = json::array();
+        for (auto& l : list) {
+            peaks.push_back(l.peak);
+            clips.push_back(l.clips);
+        }
+        to[std::string(name) + "Peaks"] = peaks;
+        to[std::string(name) + "Clips"] = clips;
+    };
+    j["cpuLoad"] = s.load.average;
+    j["cpuPeakLoad"] = s.load.peak;
+    j["overruns"] = s.overruns;
+    levels(j, "output", s.output);
+    levels(j, "masterInput", s.masterInput);
+    levels(j, "masterOutput", s.masterOutput);
+    j["masterLoad"] = s.masterLoad.average;
+    j["masterPeakLoad"] = s.masterLoad.peak;
+    // An effect has the instrument's meters too, empty and zero, as it has "effects".
+    auto plugin = [&](const EngineSnapshot::Plugin& p) {
         json np = json::array(), ao = json::array();
         for (auto& n : p.notePorts)
             np.push_back({{"name", n.name},
                           {"midi", (n.dialects & CLAP_NOTE_DIALECT_MIDI) != 0},
                           {"clap", (n.dialects & CLAP_NOTE_DIALECT_CLAP) != 0}});
-        for (auto& a : p.audioOutputs) ao.push_back({{"name", a.name}, {"channels", a.channels}, {"main", a.isMain}});
-        return json{{"id", p.id},
-                    {"name", p.name},
-                    {"format", pluginFormatName(p.format)},
-                    {"pluginId", p.pluginId},
-                    {"path", p.path},
-                    {"status", p.status},
-                    {"loaded", p.loaded},
-                    {"active", p.active},
-                    {"failed", p.failed},
-                    {"crashed", p.crashed},
-                    {"architecture", p.architecture},
-                    {"separateProcess", p.separateProcess},
-                    {"hasGui", p.hasGui},
-                    {"guiOpen", p.guiOpen},
-                    {"latency", p.latency},
-                    {"notePorts", np},
-                    {"audioOutputs", ao}};
+        // Each port with its share of outputLevels; "main" is where the chain's effects act.
+        const uint32_t main = p.audioOutputs.empty() ? 0 : mainPort(p.audioOutputs);
+        size_t level = 0;
+        for (uint32_t i = 0; i < p.audioOutputs.size(); ++i) {
+            const AudioPortInfo& a = p.audioOutputs[i];
+            json peaks = json::array(), clips = json::array();
+            for (uint32_t c = 0; c < a.channels; ++c, ++level) {
+                if (level >= p.outputLevels.size()) continue;
+                peaks.push_back(p.outputLevels[level].peak);
+                clips.push_back(p.outputLevels[level].clips);
+            }
+            ao.push_back(
+                {{"name", a.name}, {"channels", a.channels}, {"main", i == main}, {"peaks", peaks}, {"clips", clips}});
+        }
+        json jp{{"id", p.id},
+                {"name", p.name},
+                {"format", pluginFormatName(p.format)},
+                {"pluginId", p.pluginId},
+                {"path", p.path},
+                {"status", p.status},
+                {"loaded", p.loaded},
+                {"active", p.active},
+                {"failed", p.failed},
+                {"crashed", p.crashed},
+                {"architecture", p.architecture},
+                {"separateProcess", p.separateProcess},
+                {"hasGui", p.hasGui},
+                {"guiOpen", p.guiOpen},
+                {"latency", p.latency},
+                {"notePorts", np},
+                {"audioOutputs", ao}};
+        jp["load"] = p.load.average;
+        jp["peakLoad"] = p.load.peak;
+        jp["midiMessages"] = p.midiMessages;
+        return jp;
     };
     auto effects = [&](const std::vector<EngineSnapshot::Plugin>& list) {
         json a = json::array();

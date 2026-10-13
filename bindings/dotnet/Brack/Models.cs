@@ -18,14 +18,25 @@ public sealed record EngineStatus(
     double ResamplerLatencyMs,
     float MasterGain,
     float CpuLoad,
+    float CpuPeakLoad,
+    ulong Overruns,
     IReadOnlyList<float> OutputPeaks,
+    IReadOnlyList<ulong> OutputClips,
+    IReadOnlyList<float> MasterInputPeaks,
+    IReadOnlyList<ulong> MasterInputClips,
+    IReadOnlyList<float> MasterOutputPeaks,
+    IReadOnlyList<ulong> MasterOutputClips,
+    float MasterLoad,
+    float MasterPeakLoad,
     IReadOnlyList<PluginStatus> Plugins,
     IReadOnlyList<PluginStatus> MasterEffects,
     IReadOnlyList<MidiSourceStatus> MidiSources,
     IReadOnlyList<MidiRoute> MidiRoutes,
     IReadOnlyList<AudioRoute> AudioRoutes);
 
-/// <summary>An instrument with its chain of effects, or an effect (whose own Effects are empty).</summary>
+/// <summary>An instrument with its chain of effects, or an effect (whose own Effects are empty). The
+/// meters (the AudioOutputs' levels, Load to MidiMessages) are an instrument's; an effect's are empty
+/// or zero.</summary>
 public sealed record PluginStatus(
     string Id,
     string Name,
@@ -45,12 +56,18 @@ public sealed record PluginStatus(
     IReadOnlyList<NotePortInfo> NotePorts,
     IReadOnlyList<AudioPortInfo> AudioOutputs,
     bool Bypass,
-    IReadOnlyList<PluginStatus> Effects);
+    IReadOnlyList<PluginStatus> Effects,
+    float Load,
+    float PeakLoad,
+    ulong MidiMessages);
 
 /// <summary>A note input port and the dialects it accepts.</summary>
 public sealed record NotePortInfo(string Name, bool Midi, bool Clap);
 
-public sealed record AudioPortInfo(string Name, uint Channels, bool Main);
+/// <summary>An audio output port; an instrument's has each channel's Peaks (the Main port's after its effects) and
+/// Clips, up to 64 channels in all.</summary>
+public sealed record AudioPortInfo(string Name, uint Channels, bool Main, IReadOnlyList<float> Peaks,
+                                   IReadOnlyList<ulong> Clips);
 
 public sealed record MidiSourceStatus(string Id, MidiSourceKind Kind, string Name, bool Ok, string Status, ulong Messages,
                                       ulong Dropped);

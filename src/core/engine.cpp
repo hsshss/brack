@@ -185,7 +185,7 @@ bool Engine::startRunning(Timeline t, EngineMode mode, uint32_t outRate, uint32_
 bool Engine::configureOutput(uint32_t outRate, uint32_t channels, uint32_t maxOutFrames, std::string& error) {
     outRate_ = outRate;
     frameMap_.setRates(renderPos_.load(std::memory_order_acquire), outRate_, procRate_);
-    outChannels_ = std::min<uint32_t>(channels, (uint32_t)peaks_.size());
+    outChannels_ = std::min<uint32_t>(channels, (uint32_t)outputMeters_.size());
     periodFrames_ = maxOutFrames;
     mix_.assign(outChannels_, std::vector<float>(blockSize_, 0.0f));
     mixPtrs_.resize(outChannels_);
@@ -206,6 +206,7 @@ bool Engine::configureOutput(uint32_t outRate, uint32_t channels, uint32_t maxOu
         periodFrames_ + (resampler_ ? (uint32_t)std::ceil((double)blockSize_ * outRate_ / procRate_) : 0);
     cadence_.reset();
     callbackGapNs_.store(0, std::memory_order_relaxed);
+    overruns_.store(0, std::memory_order_relaxed);
     arrival_.reset(outRate_, latency, steadyNowNs());
     return true;
 }
@@ -366,12 +367,16 @@ void Engine::publishGraph() {
         const bool changing = p->change == Change::Stopping || p->change == Change::Out;
         const bool processed = (p->change == Change::None || p->change == Change::Stopping) && p->chain && p->chain->isActive();
         if (!processed && !changing) continue;
-        RtGraph::Node n{processed ? p->chain.get() : nullptr, p->direct.get(), p->pending.get(), p->events.get(), changing, {}};
+        RtGraph::Node n{processed ? p->chain.get() : nullptr, p->direct.get(), p->pending.get(), p->events.get(),
+                        p->meters.get(), changing, {}, {}};
+        if (const HostedPlugin* inst = processed ? p->instrument() : nullptr)
+            for (auto& port : inst->audioOutputs()) n.portChannels.push_back(port.channels);
         for (auto& r : audioRoutes_)
             if (processed && r.plugin == p->cfg.id && r.output < outChannels_) n.outs.push_back({r.port, r.channel, r.output, r.gain});
         nodeIndex[p->cfg.id] = (uint32_t)g->nodes.size();
         g->nodes.push_back(std::move(n));
     }
+    g->masterMeters = master_->meters.get();
     if (master_->chain && master_->chain->isActive()) {
         if (master_->change == Change::None || master_->change == Change::Stopping) g->master = master_->chain.get();
         else g->muteMix = true;
@@ -381,7 +386,10 @@ void Engine::publishGraph() {
         for (auto& r : midiRoutes_) {
             if (r.source != s->cfg.id) continue;
             auto it = nodeIndex.find(r.plugin);
-            if (it != nodeIndex.end()) src.targets.push_back({it->second, r.notePort});
+            if (it == nodeIndex.end()) continue;
+            auto t = std::find_if(src.targets.begin(), src.targets.end(), [&](auto& x) { return x.node == it->second; });
+            if (t == src.targets.end()) t = src.targets.insert(t, {it->second, {}});
+            t->ports.push_back(r.notePort);
         }
         g->sources.push_back(std::move(src));
     }
@@ -440,6 +448,8 @@ void Engine::deviceRender(float* const* out, uint32_t channels, uint32_t frames)
     }
     arrival_.rendering(renderPos_.load(std::memory_order_relaxed), now, stallNs());
     render(out, channels, frames);
+    if (steadyNowNs() - now > int64_t(frames) * 1'000'000'000 / std::max<uint32_t>(outRate_, 1))
+        overruns_.fetch_add(1, std::memory_order_relaxed);
     renderBusy_.store(false, std::memory_order_release);
 }
 
@@ -508,7 +518,7 @@ void Engine::runClock() {
 void Engine::render(float* const* out, uint32_t channels, uint32_t frames) {
     audioSeq_.fetch_add(1);
     setCurrentThreadIsAudio(true);
-    auto t0 = std::chrono::steady_clock::now();
+    const int64_t t0 = steadyNowNs();
     RtGraph* g = graph_.load();
     const uint32_t ch = std::min(channels, outChannels_);
 
@@ -561,16 +571,12 @@ void Engine::render(float* const* out, uint32_t channels, uint32_t frames) {
             for (uint32_t i = 0; i < frames; ++i) out[c][i] *= g1;
     }
 
-    for (uint32_t c = 0; c < ch; ++c) {  // metered after the master gain: what the device gets
-        float pk = 0;
-        for (uint32_t i = 0; i < frames; ++i) pk = std::max(pk, std::fabs(out[c][i]));
-        peaks_[c].store(std::max(pk, peaks_[c].load(std::memory_order_relaxed) * 0.9f), std::memory_order_relaxed);
-    }
+    const int64_t t1 = steadyNowNs();
+    const float fall = levelFall(frames, outRate_);
+    for (uint32_t c = 0; c < ch; ++c) outputMeters_[c].update(out[c], frames, fall, t1);  // what the device gets
     renderPos_.fetch_add(frames, std::memory_order_release);
-    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    double budget = outRate_ ? (double)frames / outRate_ : 1.0;
-    float load = (float)(elapsed / budget);
-    cpuLoad_.store(cpuLoad_.load(std::memory_order_relaxed) * 0.9f + load * 0.1f, std::memory_order_relaxed);
+    const double budgetNs = outRate_ ? (double)frames * 1e9 / outRate_ : 1e9;
+    load_.add((float)((t1 - t0) / budgetNs), frames, outRate_, t1);
     audioSeq_.fetch_add(1);
 }
 
@@ -595,10 +601,13 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
         auto deliver = [&](const uint8_t* d, uint32_t size, uint16_t, uint64_t time) {
             for (auto& t : src.targets) {
                 auto& node = g.nodes[t.node];
-                if (node.holdMidi)  // until its chain has changed; past due by then, so at once
-                    node.pending->add(d, size, t.port, time);
-                else
-                    node.chain->appendMidi(*node.events, t.port, d, size, offset(time));
+                if (node.holdMidi) {  // until its chain has changed; past due by then, so at once
+                    for (uint16_t port : t.ports) node.pending->add(d, size, port, time);
+                    continue;
+                }
+                bool took = false;
+                for (uint16_t port : t.ports) took |= node.chain->appendMidi(*node.events, port, d, size, offset(time));
+                if (took) node.meters->midi.fetch_add(1, std::memory_order_relaxed);
             }
         };
         src.pending->take(due, deliver);
@@ -612,7 +621,8 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
         if (!takeMidi) break;
         if (n.holdMidi) continue;
         auto deliver = [&](const uint8_t* d, uint32_t size, uint16_t port, uint64_t time) {
-            n.chain->appendMidi(*n.events, port, d, size, offset(time));
+            if (n.chain->appendMidi(*n.events, port, d, size, offset(time)))
+                n.meters->midi.fetch_add(1, std::memory_order_relaxed);
         };
         n.pending->take(due, deliver);
         n.direct->drain(scratch_, [&](const uint8_t* d, uint32_t size, uint16_t port, uint64_t time, int64_t when) {
@@ -626,8 +636,18 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
     for (uint32_t c = 0; c < outChannels_; ++c) std::memset(mix_[c].data(), 0, frames * sizeof(float));
     for (auto& n : g.nodes)
         if (n.chain) n.chain->beginProcess(frames, steadyTime_, *n.events, nullptr);
+    const int64_t now = steadyNowNs();  // the meters', one for all
+    const float fall = levelFall(frames, procRate_);
+    const double blockNs = (double)frames * 1e9 / procRate_;
     for (auto& n : g.nodes) {
-        if (!n.chain || !n.chain->endProcess()) continue;
+        if (!n.chain) continue;
+        const bool ok = n.chain->endProcess();
+        n.meters->load.add((float)(n.chain->processNs() / blockNs), frames, procRate_, now);
+        size_t m = 0;  // what the chain puts out, before the routes' gains
+        for (uint32_t port = 0; port < n.portChannels.size(); ++port)
+            for (uint32_t c = 0; c < n.portChannels[port] && m < ChainMeters::kChannels; ++c, ++m)
+                n.meters->out[m].update(ok ? n.chain->outputChannel(port, c) : nullptr, frames, fall, now);
+        if (!ok) continue;
         for (auto& o : n.outs) {
             const float* src = n.chain->outputChannel(o.port, o.channel);
             if (!src) continue;
@@ -635,9 +655,10 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
             for (uint32_t i = 0; i < frames; ++i) dst[i] += src[i] * o.gain;
         }
     }
-    if (g.muteMix) {
+    if (g.muteMix)
         for (uint32_t c = 0; c < outChannels_; ++c) std::memset(mix_[c].data(), 0, frames * sizeof(float));
-    } else if (g.master) {
+    for (uint32_t c = 0; c < outChannels_; ++c) masterInMeters_[c].update(mix_[c].data(), frames, fall, now);
+    if (g.master) {
         noEvents_.clear();
         g.master->beginProcess(frames, steadyTime_, noEvents_, mixPtrs_.data());
         const bool ok = g.master->endProcess();  // false: it crashed, or stops for a change; silent either way
@@ -647,6 +668,8 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
             else if (!ok) std::memset(mix_[c].data(), 0, frames * sizeof(float));
         }
     }
+    for (uint32_t c = 0; c < outChannels_; ++c) masterOutMeters_[c].update(mix_[c].data(), frames, fall, now);
+    g.masterMeters->load.add(g.master ? (float)(g.master->processNs() / blockNs) : 0.0f, frames, procRate_, now);
     steadyTime_ += frames;
 }
 
@@ -1607,21 +1630,24 @@ MidiSend Engine::sendMidiToSourceAtTime(std::string_view sourceId, const uint8_t
 
 EngineSnapshot Engine::snapshot() const {
     EngineSnapshot s;
-    host_->invoke([&] { s = buildSnapshot(); });
+    SnapshotMeters meters;
+    host_->invoke([&] { s = buildSnapshot(meters); });
+    readMeters(s, meters);
     return s;
 }
 
 EngineSnapshot Engine::cachedSnapshot() const {
     EngineSnapshot s;
+    SnapshotMeters meters;
     {
         std::lock_guard lock(cachedMutex_);
         s = cached_;
+        meters = cachedMeters_;
     }
     // Live values, so meters move even while the host thread is busy.
-    s.cpuLoad = cpuLoad_.load();
     s.masterGain = masterGain_.load();
-    for (uint32_t c = 0; c < s.outputPeaks.size(); ++c) s.outputPeaks[c] = peaks_[c].load();
     s.deviceStalled = s.mode == EngineMode::Device && clockActive_.load();
+    readMeters(s, meters);
     return s;
 }
 
@@ -1630,12 +1656,40 @@ void Engine::refreshSnapshot() {
 }
 
 void Engine::publishCachedSnapshot() {
-    EngineSnapshot s = buildSnapshot();
+    SnapshotMeters meters;
+    EngineSnapshot s = buildSnapshot(meters);
     std::lock_guard lock(cachedMutex_);
     cached_ = std::move(s);
+    cachedMeters_ = std::move(meters);
 }
 
-EngineSnapshot Engine::buildSnapshot() const {
+void Engine::readMeters(EngineSnapshot& s, const SnapshotMeters& meters) const {
+    constexpr auto relaxed = std::memory_order_relaxed;
+    const int64_t now = steadyNowNs();
+    auto levels = [&](const auto& list, size_t n) {
+        std::vector<EngineSnapshot::Level> v;
+        for (size_t c = 0; c < n && c < list.size(); ++c) v.push_back({list[c].peak(now), list[c].clips.load(relaxed)});
+        return v;
+    };
+    auto load = [&](const LoadMeter& m) { return EngineSnapshot::Load{m.average(now), m.peak(now)}; };
+    s.load = load(load_);
+    s.overruns = overruns_.load(relaxed);
+    s.output = levels(outputMeters_, s.outputChannels);
+    s.masterInput = levels(masterInMeters_, s.outputChannels);
+    s.masterOutput = levels(masterOutMeters_, s.outputChannels);
+    if (meters.master) s.masterLoad = load(meters.master->load);
+    for (size_t i = 0; i < s.plugins.size() && i < meters.plugins.size(); ++i) {
+        EngineSnapshot::Plugin& p = s.plugins[i];
+        const ChainMeters& m = *meters.plugins[i];
+        size_t channels = 0;
+        for (auto& port : p.audioOutputs) channels += port.channels;
+        p.outputLevels = levels(m.out, channels);
+        p.load = load(m.load);
+        p.midiMessages = m.midi.load(relaxed);
+    }
+}
+
+EngineSnapshot Engine::buildSnapshot(SnapshotMeters& meters) const {
     EngineSnapshot s;
     {
         s.mode = mode_;
@@ -1648,9 +1702,7 @@ EngineSnapshot Engine::buildSnapshot() const {
         s.resampling = resampler_ != nullptr;
         s.deviceStalled = mode_ == EngineMode::Device && clockActive_.load();
         s.resamplerLatencyMs = resampler_ ? resampler_->latencyInputFrames() * 1000.0 / procRate_ : 0.0;
-        s.cpuLoad = cpuLoad_.load();
         s.masterGain = masterGain_.load();
-        for (uint32_t c = 0; c < s.outputChannels; ++c) s.outputPeaks.push_back(peaks_[c].load());
         // One plugin: `inst` (null if not loaded) is the chain's plugin at `index`.
         auto plugin = [](const PluginSlot& slot, const PluginConfig& cfg, const std::string& status,
                          const HostedPlugin* inst, size_t index) {
@@ -1695,8 +1747,10 @@ EngineSnapshot Engine::buildSnapshot() const {
             EngineSnapshot::Plugin sp = plugin(*p, p->cfg, p->status, p->instrument(), 0);
             sp.effects = effects(*p);
             s.plugins.push_back(std::move(sp));
+            meters.plugins.push_back(p->meters);
         }
         s.masterEffects = effects(*master_);
+        meters.master = master_->meters;
         for (auto& src : sources_) {
             EngineSnapshot::Source ss;
             ss.id = src->cfg.id;

@@ -49,6 +49,9 @@ private:
     float height_, width_, x_, right_;
 };
 
+// Text in the next box of `row`; whether the mouse is on it (for a tooltip).
+bool rowText(Row& row, ImFont* font, float size, ImU32 col, std::string_view s);
+
 struct ButtonLook {
     ImU32 bg, border, text;
     bool bold = false;

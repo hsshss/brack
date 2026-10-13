@@ -217,8 +217,9 @@ public:
 
     // ---- audio thread ----
     // Appends one MIDI message for note port `port`, at frame `time` of the block. Raw MIDI is
-    // passed through untouched whenever the format allows it.
-    virtual void appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+    // passed through untouched whenever the format allows it. False if dropped (no such port, one
+    // that cannot take it, `list` full).
+    virtual bool appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
                             uint32_t time) const;
     // The main audio input of the next process(): `count` channels of its frames. Channels it has
     // past them, and every input without this, are silent.

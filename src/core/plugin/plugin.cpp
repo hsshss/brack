@@ -289,9 +289,9 @@ void PluginInstance::portsChanged() {
     }
 }
 
-void PluginInstance::appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+bool PluginInstance::appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
                                 uint32_t time) const {
-    if (port < notePorts_.size()) list.pushMidi(port, data, size, time);
+    return port < notePorts_.size() && list.pushMidi(port, data, size, time);
 }
 
 bool PluginInstance::process(uint32_t frames, uint64_t steadyTime, const InputEventList& in) {

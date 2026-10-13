@@ -213,19 +213,16 @@ void ClapInstance::idlePlugin() {
     }
 }
 
-void ClapInstance::appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+bool ClapInstance::appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
                               uint32_t time) const {
-    if (port >= portAcceptsMidi_.size()) return;
-    if (portAcceptsMidi_[port]) {
-        list.pushMidi(port, data, size, time);
-        return;
-    }
+    if (port >= portAcceptsMidi_.size()) return false;
+    if (portAcceptsMidi_[port]) return list.pushMidi(port, data, size, time);
     // The port only takes CLAP note events: note on/off become those, other messages are dropped.
-    if (size < 3) return;
+    if (size < 3) return false;
     uint8_t type = data[0] & 0xF0, ch = data[0] & 0x0F;
-    if (type == 0x90 && data[2] > 0) list.pushNote(CLAP_EVENT_NOTE_ON, port, ch, data[1], data[2] / 127.0, time);
-    else if (type == 0x80 || type == 0x90)
-        list.pushNote(CLAP_EVENT_NOTE_OFF, port, ch, data[1], data[2] / 127.0, time);
+    if (type == 0x90 && data[2] > 0) return list.pushNote(CLAP_EVENT_NOTE_ON, port, ch, data[1], data[2] / 127.0, time);
+    if (type == 0x80 || type == 0x90) return list.pushNote(CLAP_EVENT_NOTE_OFF, port, ch, data[1], data[2] / 127.0, time);
+    return false;
 }
 
 bool ClapInstance::processPlugin(uint32_t frames, uint64_t steadyTime, const InputEventList& in) {

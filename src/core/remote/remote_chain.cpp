@@ -302,9 +302,10 @@ public:
     }
 
     // ---- audio thread ----
-    void appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+    bool appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
                     uint32_t time) const override {
-        if (hasInstrument_ && port < plugins_[0]->notePorts().size()) list.pushMidi(port, data, size, time);  // the host converts it
+        // The host converts it, and may drop it there (a port that takes only CLAP notes).
+        return hasInstrument_ && port < plugins_[0]->notePorts().size() && list.pushMidi(port, data, size, time);
     }
 
     void beginProcess(uint32_t frames, uint64_t steadyTime, const InputEventList& in,
@@ -329,6 +330,7 @@ public:
     }
 
     bool endProcess() override {
+        processNs_ = 0;
         if (!kicked_) return false;
         kicked_ = false;
         const HostProcess::Outcome o = host_->waitBlock(kProcessTimeoutMs);
@@ -338,6 +340,7 @@ public:
             end(Ending::Hung, "process");
         } else {
             checkStateChanges();
+            processNs_ = host_->control().processNs;
             switch ((BlockResult)host_->control().result) {
                 case BlockResult::Audio: return true;
                 case BlockResult::Stopped: stopAck_.store(true, std::memory_order_release); break;
@@ -346,6 +349,8 @@ public:
         }
         return false;
     }
+
+    uint32_t processNs() const override { return processNs_; }
 
     const float* outputChannel(uint32_t port, uint32_t channel) const override {
         if (port >= outPtrs_.size() || channel >= outPtrs_[port].size()) return nullptr;
@@ -465,6 +470,7 @@ private:
     std::vector<float*> inPtrs_;                // into the shared channels
     std::vector<std::vector<float*>> outPtrs_;  // likewise
     bool kicked_ = false;                       // audio thread
+    uint32_t processNs_ = 0;                    // audio thread
 };
 
 RemotePlugin::RemotePlugin(RemoteChain& chain, const Message& info, const std::string& path,

@@ -18,7 +18,7 @@ public:
     ~ClapInstance() override;
 
     // Encodes MIDI in a dialect the port accepts: raw MIDI whenever it can.
-    void appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
+    bool appendMidi(InputEventList& list, uint16_t port, const uint8_t* data, uint32_t size,
                     uint32_t time) const override;
 
     // ---- clap_host callbacks ----

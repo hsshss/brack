@@ -32,6 +32,7 @@
 #include "util/arrival_clock.h"
 #include "util/callback_cadence.h"
 #include "util/frame_map.h"
+#include "util/meters.h"
 
 namespace brack {
 
@@ -110,6 +111,15 @@ struct EngineEvent {
 };
 
 struct EngineSnapshot {
+    struct Level {  // a channel's
+        float peak = 0;
+        uint64_t clips = 0;  // blocks with a sample past full scale, since the meter began
+    };
+    struct Load {  // the time to process a block, against the time it lasts
+        float average = 0;
+        float peak = 0;  // the most within about the last second
+    };
+
     EngineMode mode = EngineMode::Stopped;
     EngineConfig config;
     std::string deviceName;
@@ -119,8 +129,12 @@ struct EngineSnapshot {
                                  // processing continues on brack's own clock until it returns
     double resamplerLatencyMs = 0;
     float masterGain = 1.0f;
-    float cpuLoad = 0;
-    std::vector<float> outputPeaks;
+    Load load;               // of render(), against the buffer it fills
+    uint64_t overruns = 0;   // the device's callbacks, since it was opened, that took longer than their buffer lasts
+    std::vector<Level> output;  // after the master gain
+    // The mix before and after the master's chain (the same without one).
+    std::vector<Level> masterInput, masterOutput;
+    Load masterLoad;  // the master's chain's
 
     struct Plugin {
         std::string id, name, pluginId, path, status;
@@ -136,6 +150,12 @@ struct EngineSnapshot {
         uint32_t latency = 0;
         bool bypass = false;          // an effect's
         std::vector<Plugin> effects;  // an instrument's chain, in order
+        // An instrument's (an effect has none): its chain's output channels, port after port
+        // as audioOutputs lists them, before the routes' gains; its chain's load; the MIDI
+        // messages it took (once each, however many of its note ports).
+        std::vector<Level> outputLevels;
+        Load load;
+        uint64_t midiMessages = 0;
     };
     struct Source {
         std::string id, name, status;
@@ -385,7 +405,14 @@ private:
     void rebuildInjectionMaps();
     void pushEvent(EngineEvent e);  // host thread
     void checkEvents();             // host thread, every idle pass
-    EngineSnapshot buildSnapshot() const;
+    // The chains' meters a snapshot shows: its instruments', in its order, and the master's.
+    struct SnapshotMeters {
+        std::vector<std::shared_ptr<const ChainMeters>> plugins;
+        std::shared_ptr<const ChainMeters> master;
+    };
+    // Host thread: all but the meters, which readMeters() fills in on any thread.
+    EngineSnapshot buildSnapshot(SnapshotMeters& meters) const;
+    void readMeters(EngineSnapshot& s, const SnapshotMeters& meters) const;
     void publishCachedSnapshot();
 
     // audio thread
@@ -451,6 +478,7 @@ private:
     // cached snapshot (written on the host thread, read anywhere)
     mutable std::mutex cachedMutex_;
     EngineSnapshot cached_;
+    SnapshotMeters cachedMeters_;  // cached_'s
     std::chrono::steady_clock::time_point lastCachePublish_{};  // host thread
     std::atomic<uint64_t> audioSeq_{0};  // odd while the audio thread is inside render()
 
@@ -480,9 +508,10 @@ private:
     bool stallSeen_ = false;                  // host thread
     float masterApplied_ = 1.0f;  // audio thread: the gain the last buffer ended on
 
-    // meters
-    std::atomic<float> cpuLoad_{0};
-    std::array<std::atomic<float>, 32> peaks_{};
+    // meters (written by the audio thread)
+    LoadMeter load_;
+    std::atomic<uint64_t> overruns_{0};
+    std::array<LevelMeter, 32> outputMeters_, masterInMeters_, masterOutMeters_;
 };
 
 }  // namespace brack

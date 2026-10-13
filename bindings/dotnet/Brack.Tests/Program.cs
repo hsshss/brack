@@ -149,6 +149,7 @@ int RunTests()
         }, "plugin host process");
         Check(BrackLibrary.Architecture == plugin.Architecture, "the library's architecture, the synth's");
         Check(plugin.NotePorts.Count == 1 && plugin.NotePorts[0].Midi && plugin.AudioOutputs[0].Channels == 2, "ports");
+        Check(plugin.AudioOutputs[0] is { Main: true, Peaks.Count: 2, Clips.Count: 2 }, "the main port's levels");
         Check(status.AudioRoutes.Count == 2 && status.AudioRoutes[1].Output == 1, "routed to outputs 1 and 2");
 
         engine.SetPluginName(id, "My synth");

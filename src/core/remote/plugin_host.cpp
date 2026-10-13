@@ -250,6 +250,7 @@ private:
                 chain_->endProcess();
                 stopped = true;
                 c.result = (uint32_t)BlockResult::Stopped;
+                c.processNs = 0;
             } else {
                 if (stopped) chain_->resumeProcessing();
                 stopped = false;
@@ -271,6 +272,7 @@ private:
                             std::memcpy(outputs + i * maxFrames_, src, frames * sizeof(float));
                 }
                 c.result = (uint32_t)(ok ? BlockResult::Audio : BlockResult::Failed);
+                c.processNs = chain_->processNs();
             }
             link_.blockDone();
         }

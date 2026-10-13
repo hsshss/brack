@@ -23,6 +23,16 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+# MSVC under Ninja: header dependencies from /sourceDependencies, whatever the compiler's language
+# and the console's code page (cmake/msvc_depfile.cmake).
+if(CMAKE_GENERATOR MATCHES "Ninja" AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+  foreach(lang C CXX)
+    set(CMAKE_${lang}_DEPFILE_FORMAT gcc)
+    set(CMAKE_DEPFILE_FLAGS_${lang} "/sourceDependencies <DEP_FILE>.json")
+    list(PREPEND CMAKE_${lang}_COMPILER_LAUNCHER "${CMAKE_COMMAND}" -P "${PROJECT_SOURCE_DIR}/cmake/msvc_depfile.cmake" --)
+  endforeach()
+endif()
+
 # On Linux the GUI is built where GLFW's X11 backend has its development files (Ubuntu:
 # libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev); under Wayland it
 # runs in Xwayland, as plugin editors do (src/core/plugin/host_window_x11.cpp).

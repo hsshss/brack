@@ -1,0 +1,88 @@
+# The compiler launcher for MSVC under Ninja (CMakeLists.txt): `cmake -P msvc_depfile.cmake -- <compile>`.
+# Runs the compile, then turns the headers cl lists with /sourceDependencies (JSON) into the depfile
+# Ninja reads. Ninja's own way, parsing /showIncludes, matches a prefix in the compiler's language
+# and the console's code page, so it records nothing when either differs from the configure's.
+
+# The compile, each argument as a bracket argument: a CMake list would split at a ';' and join an
+# argument ending in '\' (a /Fd folder) to the next.
+set(cmd "")
+set(json "")
+set(obj "")
+set(src "")
+set(take OFF)
+math(EXPR last "${CMAKE_ARGC} - 1")
+foreach(i RANGE 0 ${last})
+  set(a "${CMAKE_ARGV${i}}")
+  if(NOT take)
+    if(a STREQUAL "--")
+      set(take ON)
+    endif()
+    continue()
+  endif()
+  string(APPEND cmd " [==[${a}]==]")
+  if(prev MATCHES "^[-/]sourceDependencies$")
+    set(json "${a}")
+  elseif(prev MATCHES "^[-/]c$")
+    set(src "${a}")
+  elseif(a MATCHES "^[-/]Fo(.+)")
+    set(obj "${CMAKE_MATCH_1}")
+  endif()
+  set(prev "${a}")
+endforeach()
+if(NOT json OR NOT obj)
+  message(FATAL_ERROR "msvc_depfile.cmake: no /sourceDependencies or /Fo in: ${cmd}")
+endif()
+string(REGEX REPLACE "\\.json$" "" depfile "${json}")
+
+# cl first prints the source's name, which Ninja's /showIncludes parsing also left out.
+cmake_language(EVAL CODE "execute_process(COMMAND${cmd} RESULT_VARIABLE result
+  OUTPUT_FILE [==[${depfile}.out]==] ERROR_FILE [==[${depfile}.out]==])")
+file(READ "${depfile}.out" out)
+file(REMOVE "${depfile}.out")
+string(REPLACE "\r\n" "\n" out "${out}")
+get_filename_component(name "${src}" NAME)
+string(FIND "${out}" "${name}\n" at)
+if(name AND at EQUAL 0)
+  string(LENGTH "${name}\n" skip)
+  string(SUBSTRING "${out}" ${skip} -1 out)
+endif()
+string(REGEX REPLACE "\n$" "" out "${out}")
+if(NOT out STREQUAL "")
+  message(NOTICE "${out}")
+endif()
+if(NOT result EQUAL 0)
+  file(REMOVE "${json}")
+  if(NOT result MATCHES "^[0-9]+$")
+    set(result 1)  # a crash, as text
+  endif()
+  cmake_language(EXIT ${result})
+endif()
+
+# The JSON's paths have no quotes; regular expressions avoid parsing it once per header.
+file(READ "${json}" text)
+file(REMOVE "${json}")
+string(REGEX MATCH "\"Includes\"[ \t\r\n]*:[ \t\r\n]*\\[[^]]*\\]" includes "${text}")
+string(REGEX MATCHALL "\"[^\"]*\"" includes "${includes}")
+if(NOT includes)
+  message(FATAL_ERROR "msvc_depfile.cmake: no \"Includes\" in ${json}")
+endif()
+list(REMOVE_AT includes 0)  # "Includes"
+# Make's escapes, as Ninja reads them: a space, '#', '$'.
+string(REPLACE "$" "$$" target "${obj}")
+string(REPLACE " " "\\ " target "${target}")
+set(deps "${target}:")
+foreach(path IN LISTS includes)
+  # The toolset's and the SDK's headers, as Ninja's /showIncludes parsing leaves them out.
+  string(TOLOWER "${path}" lower)
+  if(lower MATCHES "program files|microsoft visual studio")
+    continue()
+  endif()
+  string(REGEX REPLACE "^\"|\"$" "" path "${path}")
+  string(REPLACE "\\\\" "\\" path "${path}")
+  string(REPLACE "\\/" "/" path "${path}")
+  string(REPLACE "$" "$$" path "${path}")
+  string(REPLACE "#" "\\#" path "${path}")
+  string(REPLACE " " "\\ " path "${path}")
+  string(APPEND deps " \\\n  ${path}")
+endforeach()
+file(WRITE "${depfile}" "${deps}\n")

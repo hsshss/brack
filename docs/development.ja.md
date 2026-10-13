@@ -167,9 +167,6 @@ cmake -S . -B build-universal -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAK
     - できたものは `dumpbin /headers` で確かめられます。ARM64EC 版は「8664 machine (x64) (ARM64X)」、ARM64X 版は「AA64 machine (ARM64) (ARM64X)」です。
   - スクリプトは ARM64EC の部品を持つ Visual Studio を探し（`vswhere -latest` はその部品の無いものを選ぶことがあるため）、x64 の PC では x64 から ARM64 へのクロスの環境（`amd64_arm64`）で作ります。この 2 つのバンドルが無ければ、表はその行を「not run」にし、`--all` を失敗にします。
 - CMake が取ってくる依存ライブラリはフォルダの階層が深いので、長いパスを許しておきます（レジストリの `LongPathsEnabled`、git の `core.longpaths`）。
-- SSH や PowerShell のスクリプトから Visual Studio の環境（`vcvarsall.bat`）を作ってビルドするときは、コンソールの入力と出力の両方のコードページを UTF-8 にしてから構成します。出力だけを替えると、Ninja がヘッダーの依存関係を拾わなくなります。
-  - cl.exe は `/showIncludes` の接頭辞（「メモ: インクルード ファイル:」）を出力のコードページで出し、CMake は入力のコードページで読むためです。拾っていなければ、`ninja -C build -t deps <obj>` が `#deps 0` になり、ヘッダーを変えても何もビルドし直されません。
-  - 接頭辞はビルドフォルダの構成に焼き付くので、直した後はビルドフォルダを消して構成からやり直します。
 - PowerShell の `*>` で書いたログは UTF-16 になります。`cmd /c "... > log 2>&1"` で書けば、元の文字コードのままです。
 - PowerShell の `-File` に配列を渡すと、1 つの文字列になります（`-Modes now,ahead` は `"now,ahead"`）。スクリプトの中で `-split ","` します。
 - SSH から起動した GUI は、画面の無いセッションで動くので見えません。デスクトップに出すには、タスクスケジューラでログオン中のセッションに起動します（`schtasks /create /tn brackgui /tr <brack.exe のパス> /sc once /st 23:59 /it /f`、`schtasks /run /tn brackgui`、終わったら `schtasks /delete /tn brackgui /f`）。

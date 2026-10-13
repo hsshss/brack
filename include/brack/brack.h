@@ -340,6 +340,9 @@ BRACK_API int BRACK_CALL brack_set_event_notify(brack_engine* e, brack_event_not
 BRACK_API int BRACK_CALL brack_get_status(brack_engine* e, char* buf, size_t size, size_t* needed);
 BRACK_API int BRACK_CALL brack_get_status_cached(brack_engine* e, char* buf, size_t size, size_t* needed);
 BRACK_API int BRACK_CALL brack_list_audio_devices(char* buf, size_t size, size_t* needed);
+/* The rate the output device `name` (NULL or "" for the default) runs at in shared mode, the one
+ * brack_start converts to: it is opened, not started, to ask. */
+BRACK_API int BRACK_CALL brack_audio_device_rate(const char* name, uint32_t* rate);
 BRACK_API int BRACK_CALL brack_list_midi_inputs(char* buf, size_t size, size_t* needed);
 /* Lists the plugins in the standard CLAP, VST3 and VST2 locations and in extra_dirs (optional,
  * ';'-separated). Runs on the calling thread and holds up no engine. It loads every plugin file

@@ -70,7 +70,7 @@ const std::map<std::string, std::string> kNotOffered = {
 const std::set<std::string> kStandalone = {
     "brack_api_version",     "brack_version_string",       "brack_architecture",  "brack_last_error",
     "brack_set_log_callback", "brack_engine_create",       "brack_engine_destroy",
-    "brack_list_audio_devices",   "brack_list_midi_inputs",
+    "brack_list_audio_devices",   "brack_list_midi_inputs",     "brack_audio_device_rate",
     "brack_virtual_midi_available", "brack_virtual_midi_removal_hangs",
 };
 

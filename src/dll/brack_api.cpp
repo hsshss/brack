@@ -612,6 +612,17 @@ BRACK_API int BRACK_CALL brack_get_status_cached(brack_engine* e, char* buf, siz
     return guarded(e, [&] { return writeText(brack::snapshotToJson(e->engine.cachedSnapshot()), buf, size, needed); });
 }
 
+BRACK_API int BRACK_CALL brack_audio_device_rate(const char* name, uint32_t* rate) {
+    try {
+        if (!rate) return fail(BRACK_ERR_INVALID_ARGUMENT, "rate is NULL");
+        std::string err;
+        *rate = brack::audioOutputRate(str(name), err);
+        return *rate ? ok() : failed(err);
+    } catch (const std::exception& ex) {
+        return failed(ex.what());
+    }
+}
+
 BRACK_API int BRACK_CALL brack_list_audio_devices(char* buf, size_t size, size_t* needed) {
     try {
         return writeText(brack::audioDevicesToJson(brack::listAudioOutputDevices()), buf, size, needed);

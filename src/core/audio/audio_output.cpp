@@ -339,4 +339,11 @@ void AudioOutput::movedTo(const std::string& key) {
     impl_->key = key;
 }
 
+uint32_t audioOutputRate(const std::string& deviceName, std::string& error) {
+    AudioOutput out;
+    AudioOutputConfig cfg;
+    cfg.deviceName = deviceName;
+    return out.open(cfg, [](float* const*, uint32_t, uint32_t) {}, error) ? out.sampleRate() : 0;
+}
+
 }  // namespace brack

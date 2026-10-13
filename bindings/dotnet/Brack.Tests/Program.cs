@@ -103,6 +103,19 @@ int RunTests()
 
     Check(BrackLibrary.ApiVersion >= BrackLibrary.BindingApiVersion, "API version");
     Console.WriteLine($"{BrackLibrary.VersionString}, API {BrackLibrary.ApiVersion}");
+    // A listed output may not open: ALSA lists its default on a machine with no sound card.
+    if (BrackLibrary.ListAudioDevices().Count > 0)
+    {
+        try
+        {
+            Check(BrackLibrary.AudioDeviceRate(null) > 0, "the default output's rate");
+        }
+        catch (BrackException e) when (e.Code == BrackErrorCode.Failed)
+        {
+            Console.WriteLine($"the default output does not open: {e.Message}");
+        }
+    }
+    Throws(BrackErrorCode.Failed, () => BrackLibrary.AudioDeviceRate("brack test device"), "the rate of no device");
 
     // Playing a note, with and without sample rate conversion.
     using (var engine = new BrackEngine())

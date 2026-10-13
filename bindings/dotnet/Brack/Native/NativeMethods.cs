@@ -275,6 +275,10 @@ internal static unsafe partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int brack_list_audio_devices(byte* buf, nuint size, nuint* needed);
 
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int brack_audio_device_rate(string? name, uint* rate);
+
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int brack_list_midi_inputs(byte* buf, nuint size, nuint* needed);

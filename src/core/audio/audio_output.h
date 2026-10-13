@@ -29,6 +29,10 @@ using AudioRenderFn = std::function<void(float* const* out, uint32_t channels, u
 
 std::vector<AudioDeviceInfo> listAudioOutputDevices();
 
+// The rate the output device (empty: the system's default) runs at in shared mode, found by opening
+// it as the engine does, without starting it. 0, with `error`, if it does not open.
+uint32_t audioOutputRate(const std::string& deviceName, std::string& error);
+
 // Identifies the system's current default output device (the WASAPI endpoint id
 // on Windows). Empty when there is no output device at all.
 std::string defaultAudioOutputKey();

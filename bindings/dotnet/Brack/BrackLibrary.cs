@@ -89,6 +89,18 @@ public static unsafe class BrackLibrary
     public static IReadOnlyList<AudioDeviceInfo> ListAudioDevices() =>
         BrackJson.Parse(ListAudioDevicesJson(), BrackJson.Default.AudioDeviceInfoArray);
 
+    /// <summary>
+    /// The rate the output device <paramref name="name"/> (null or empty for the default) runs at in shared mode, the
+    /// one <see cref="BrackEngine.Start"/> converts to: it is opened, not started, to ask.
+    /// </summary>
+    /// <exception cref="BrackException">It does not open.</exception>
+    public static uint AudioDeviceRate(string? name)
+    {
+        uint rate;
+        Interop.Check(NativeMethods.brack_audio_device_rate(name, &rate));
+        return rate;
+    }
+
     public static string ListAudioDevicesJson() =>
         Interop.ReadText((buf, size, needed) => NativeMethods.brack_list_audio_devices(buf, size, needed));
 

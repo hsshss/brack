@@ -35,6 +35,15 @@ internal static unsafe class Interop
         return Encoding.UTF8.GetString(bytes, 0, Math.Max(length - 1, 0));
     }
 
+    // The same for a call made again and again (the status): `size` is where to start, and is left
+    // at what this one needed with room to grow, so that the next makes its text once.
+    internal static string ReadText(BufferCall call, ref int size)
+    {
+        byte[] bytes = ReadBytes(call, size, out int length);
+        size = Math.Max(size, length + length / 4);
+        return Encoding.UTF8.GetString(bytes, 0, Math.Max(length - 1, 0));
+    }
+
     internal static byte[] ReadBytes(BufferCall call, int initialSize = 4096)
     {
         byte[] bytes = ReadBytes(call, initialSize, out int length);

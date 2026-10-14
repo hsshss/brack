@@ -64,7 +64,7 @@
 extern "C" {
 #endif
 
-#define BRACK_API_VERSION 2
+#define BRACK_API_VERSION 3
 
 enum {
     BRACK_OK = 0,
@@ -238,16 +238,27 @@ BRACK_API int BRACK_CALL brack_reopen_midi_source(brack_engine* e, const char* s
 BRACK_API int BRACK_CALL brack_connect_midi(brack_engine* e, const char* source_id, const char* plugin_id, uint32_t note_port);
 BRACK_API int BRACK_CALL brack_disconnect_midi(brack_engine* e, const char* source_id, const char* plugin_id, uint32_t note_port);
 /* Routes channel `channel` of audio output port `port` of a plugin to engine output `output`
- * (adds to the plugin's existing audio routes; for a route that exists, sets its gain). */
+ * (adds to the plugin's existing audio routes; a route that exists stays as it is). */
 BRACK_API int BRACK_CALL brack_connect_audio(brack_engine* e, const char* plugin_id, uint32_t port, uint32_t channel,
-                                             uint32_t output, float gain);
+                                             uint32_t output);
 BRACK_API int BRACK_CALL brack_disconnect_audio(brack_engine* e, const char* plugin_id, uint32_t port, uint32_t channel,
                                                 uint32_t output);
 BRACK_API int BRACK_CALL brack_clear_audio_routes(brack_engine* e, const char* plugin_id);
+/* An instrument's volume: a linear gain on its chain's output, before its audio routes (1 = unity,
+ * 0 = silent), and a mute (silent whatever the gain, while it plays on and takes MIDI). Its meters
+ * read after both. Saved in sessions; ramped from the next block; never waits for Brack's thread.
+ * BRACK_ERR_NOT_FOUND for an id that is no instrument. */
+BRACK_API int BRACK_CALL brack_set_plugin_gain(brack_engine* e, const char* plugin_id, float gain);
+BRACK_API int BRACK_CALL brack_set_plugin_mute(brack_engine* e, const char* plugin_id, int mute);
 /* Linear gain applied to every output channel after the SRC (1 = unity, 0 = silent; saved in
  * sessions). Takes effect on the next buffer, ramped. Never blocks: safe from any thread. */
 BRACK_API int BRACK_CALL brack_set_master_gain(brack_engine* e, float gain);
 BRACK_API float BRACK_CALL brack_get_master_gain(brack_engine* e);
+/* Silences every output channel whatever the master gain, which it keeps, while the plugins play
+ * on (saved in sessions). Takes effect on the next buffer, ramped. Never blocks: safe from any
+ * thread. brack_get_master_mute: 1 while muted, else 0. */
+BRACK_API int BRACK_CALL brack_set_master_mute(brack_engine* e, int mute);
+BRACK_API int BRACK_CALL brack_get_master_mute(brack_engine* e);
 
 /* ---- direct MIDI injection (no MIDI port involved) ----
  * One complete MIDI 1.0 message per call: 1-3 bytes, or a SysEx F0 ... F7.
@@ -294,9 +305,9 @@ BRACK_API int BRACK_CALL brack_save_session_json(brack_engine* e, char* buf, siz
  * loading it or any engine: "id", "name" ("" if the file has none), "format", "path",
  * "pluginId", "bypass" and "effects". */
 BRACK_API int BRACK_CALL brack_describe_session(const char* path, char* buf, size_t size, size_t* needed);
-/* Removes every plugin, MIDI source and route. The configuration and master gain stay. */
+/* Removes every plugin, MIDI source and route. The configuration and master volume stay. */
 BRACK_API int BRACK_CALL brack_clear(brack_engine* e);
-/* Goes up whenever what a session saves changes: the rack, routing, configuration, master gain,
+/* Goes up whenever what a session saves changes: the rack, routing, configuration, volumes,
  * or a plugin's state as the plugin reports it (an edit in its editor, say). MIDI does not
  * count. Compare with the value at the last save to know whether to save. Never blocks. */
 BRACK_API uint64_t BRACK_CALL brack_change_count(brack_engine* e);
@@ -331,10 +342,10 @@ BRACK_API int BRACK_CALL brack_set_event_notify(brack_engine* e, brack_event_not
 /* ---- inspection (JSON) ----
  * brack_get_status: engine state, plugins (with note/audio ports, and the architecture they run
  * as and whether in a plugin host process; each instrument with its "effects"), the master's
- * "masterEffects", sources, routes. Meters, the engine's and each instrument's: levels as "...Peaks"
- * with "...Clips" (blocks past full scale), an instrument's per port in "audioOutputs" ("peaks",
- * "clips"; the "main" port's after its effects); loads as the time to process against the time it
- * lasts. Clips and "midiMessages" never go down: they count from the engine's start, an
+ * "masterEffects", sources, routes; each instrument's volume, "gain" and "mute". Meters, the
+ * engine's and each instrument's: levels as "...Peaks" with "...Clips" (blocks past full scale), an
+ * instrument's per port in "audioOutputs" ("peaks", "clips"; after its volume, and the "main"
+ * port's after its effects); loads as the time to process against the time it lasts. Clips and "midiMessages" never go down: they count from the engine's start, an
  * instrument's from when it was added.
  * Waits for Brack's thread, which may be busy (loading a plugin, say).
  * brack_get_status_cached: the same, as of at most ~50 ms ago (meters current), without waiting.

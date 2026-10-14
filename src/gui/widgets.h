@@ -11,7 +11,7 @@
 
 namespace brack::ui {
 
-enum class Icon { None, Rack, Routing, Sliders, Log, Power, ChevronDown, Plus, File, Grip, Warning, Editor, Reload, More, Close, Search, Copy, Check, Folder };
+enum class Icon { None, Rack, Routing, Sliders, Log, Power, ChevronDown, Plus, File, Grip, Warning, Editor, Reload, More, Close, Search, Copy, Check, Folder, Speaker, SpeakerMuted };
 
 // Stroke icons on a 24-unit grid, drawn `size` screen pixels square at `pos`.
 void drawIcon(ImDrawList* dl, Icon icon, ImVec2 pos, float size, ImU32 col);
@@ -88,6 +88,9 @@ bool toggleSwitch(const char* id, bool& on);
 // hide its id after "##"; with no label text it is the box alone.
 bool checkbox(const char* label, bool& on, float height, float fontSize = 13);
 float checkboxWidth(const char* label, float fontSize = 13);
+
+// A small speaker in a `height` square at the cursor, crossed out while `muted`; clicking flips it.
+bool muteToggle(const char* id, bool& muted, float height);
 
 // A tag such as a plugin's format; drawn only.
 void badge(ImVec2 pos, std::string_view s, ImFont* font, float size, ImU32 bg, ImU32 border, ImU32 textCol, float padX);

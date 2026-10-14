@@ -22,11 +22,11 @@ struct LevelMeter {
     std::atomic<uint64_t> clips{0};  // blocks with a sample past full scale
 
     // Audio thread, at `nowNs`. `src` null: silent this block (the peak only falls). `fall`: see
-    // levelFall().
-    void update(const float* src, uint32_t frames, float fall, int64_t nowNs) {
+    // levelFall(). Sample i is read times g0 + step * (i + 1), a gain ramped across the block.
+    void update(const float* src, uint32_t frames, float fall, int64_t nowNs, float g0 = 1.0f, float step = 0.0f) {
         float pk = 0;
         if (src)
-            for (uint32_t i = 0; i < frames; ++i) pk = std::max(pk, std::fabs(src[i]));
+            for (uint32_t i = 0; i < frames; ++i) pk = std::max(pk, std::fabs(src[i] * (g0 + step * (float)(i + 1))));
         if (pk > 1.0f) clips.fetch_add(1, std::memory_order_relaxed);
         peak_.store(std::max(pk, peak(nowNs) * fall), std::memory_order_relaxed);
         updatedNs_.store(nowNs, std::memory_order_relaxed);

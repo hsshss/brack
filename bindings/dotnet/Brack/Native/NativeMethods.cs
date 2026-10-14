@@ -176,8 +176,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial int brack_connect_audio(BrackEngineHandle e, string plugin_id, uint port, uint channel, uint output,
-                                                    float gain);
+    internal static partial int brack_connect_audio(BrackEngineHandle e, string plugin_id, uint port, uint channel, uint output);
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -187,6 +186,14 @@ internal static unsafe partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int brack_clear_audio_routes(BrackEngineHandle e, string plugin_id);
 
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int brack_set_plugin_gain(BrackEngineHandle e, string plugin_id, float gain);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int brack_set_plugin_mute(BrackEngineHandle e, string plugin_id, int mute);
+
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int brack_set_master_gain(BrackEngineHandle e, float gain);
@@ -194,6 +201,14 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial float brack_get_master_gain(BrackEngineHandle e);
+
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int brack_set_master_mute(BrackEngineHandle e, int mute);
+
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int brack_get_master_mute(BrackEngineHandle e);
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

@@ -29,6 +29,7 @@ std::string snapshotToJson(const EngineSnapshot& s) {
     j["resamplerQuality"] = resamplerQualityName(s.config.resamplerQuality);
     j["resamplerLatencyMs"] = s.resamplerLatencyMs;
     j["masterGain"] = s.masterGain;
+    j["masterMute"] = s.masterMute;
     auto levels = [&](json& to, const char* name, const std::vector<EngineSnapshot::Level>& list) {
         json peaks = json::array(), clips = json::array();
         for (auto& l : list) {
@@ -46,7 +47,7 @@ std::string snapshotToJson(const EngineSnapshot& s) {
     levels(j, "masterOutput", s.masterOutput);
     j["masterLoad"] = s.masterLoad.average;
     j["masterPeakLoad"] = s.masterLoad.peak;
-    // An effect has the instrument's meters too, empty and zero, as it has "effects".
+    // An effect has the instrument's volume and meters too, at unity and zero, as it has "effects".
     auto plugin = [&](const EngineSnapshot::Plugin& p) {
         json np = json::array(), ao = json::array();
         for (auto& n : p.notePorts)
@@ -84,6 +85,8 @@ std::string snapshotToJson(const EngineSnapshot& s) {
                 {"latency", p.latency},
                 {"notePorts", np},
                 {"audioOutputs", ao}};
+        jp["gain"] = p.gain;
+        jp["mute"] = p.mute;
         jp["load"] = p.load.average;
         jp["peakLoad"] = p.load.peak;
         jp["midiMessages"] = p.midiMessages;
@@ -123,7 +126,7 @@ std::string snapshotToJson(const EngineSnapshot& s) {
     j["midiRoutes"] = mr;
     json ar = json::array();
     for (auto& r : s.audioRoutes)
-        ar.push_back({{"plugin", r.plugin}, {"port", r.port}, {"channel", r.channel}, {"output", r.output}, {"gain", r.gain}});
+        ar.push_back({{"plugin", r.plugin}, {"port", r.port}, {"channel", r.channel}, {"output", r.output}});
     j["audioRoutes"] = ar;
     return j.dump(2);
 }

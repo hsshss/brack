@@ -55,9 +55,10 @@ The Brack of each architecture runs these plugins.
 | MIDI route | Connects a source to a plugin's note port. Connections can be many to many. |
 | Effect | A plugin that processes an instrument's main output, one after another. Effects run in the instrument's process, so only those built for the instrument's architecture run. They get no MIDI. Their IDs share the instruments' name space. |
 | Master | Effects that process the mix of all the instruments, one after another, before the SRC and the master volume. Only those built for Brack's architecture run. |
-| Audio route | Connects a channel of a plugin's output port to an output channel, with a gain. |
-| Master volume | A gain applied to all output channels after sample rate conversion (SRC). |
-| Session | Saves all of the above, the plugins' state (base64), the effects' bypass and the audio settings to a JSON file. An instrument's effects are in its `effects`, and the master's in `masterEffects` at the top level. |
+| Audio route | Connects a channel of a plugin's output port to an output channel. |
+| Instrument volume | Each instrument's gain and mute, after its effects and before its audio routes. A muted instrument goes on taking MIDI and playing, but is not heard. |
+| Master volume | A gain and a mute applied to all output channels after sample rate conversion (SRC). |
+| Session | Saves all of the above, the plugins' state (base64), the effects' bypass and the audio settings to a JSON file. An instrument's effects are in its `effects`, and the master's in `masterEffects` at the top level. An instrument's volume is its `gain` and `mute`, and the master volume is `masterGain` and `masterMute` at the top level. |
 
 ## GUI
 

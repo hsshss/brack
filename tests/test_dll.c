@@ -239,8 +239,18 @@ static void rack_edits(const char* synth) {
     const uint8_t on[3] = {0x90, 69, 127};
     CHECK(brack_send_midi(e, "b", 0, on, 3) == BRACK_OK);
     CHECK(render_peak(e, 4800) == 0.0f);
-    CHECK(brack_connect_audio(e, "b", 0, 0, 0, 1.0f) == BRACK_OK);
+    CHECK(brack_connect_audio(e, "b", 0, 0, 0) == BRACK_OK);
     CHECK(render_peak(e, 4800) > 0.1f);
+
+    /* Its volume: muted, it is silent (after the block the mute ramps in). */
+    CHECK(brack_set_plugin_gain(e, "b", 0.5f) == BRACK_OK);
+    CHECK(brack_set_plugin_mute(e, "b", 1) == BRACK_OK);
+    render_peak(e, 512);
+    CHECK(render_peak(e, 4800) == 0.0f);
+    CHECK(brack_set_plugin_mute(e, "b", 0) == BRACK_OK);
+    CHECK(brack_set_plugin_gain(e, "nope", 1.0f) == BRACK_ERR_NOT_FOUND);
+    CHECK(brack_set_plugin_mute(e, "nope", 1) == BRACK_ERR_NOT_FOUND);
+    CHECK(brack_set_plugin_gain(e, "b", -1.0f) == BRACK_ERR_INVALID_ARGUMENT);
     CHECK(brack_disconnect_audio(e, "b", 0, 0, 0) == BRACK_OK);
     CHECK(brack_disconnect_audio(e, "b", 0, 0, 0) == BRACK_ERR_NOT_FOUND);
     render_peak(e, 4800);
@@ -675,7 +685,7 @@ static void mixed_architectures(char** synths, char** other_bins, int other_coun
                     if (strcmp(expected[b], "no-binary") == 0) CHECK(no_binary);
                     continue;
                 }
-                CHECK(brack_connect_audio(e, ids[rack], 0, 0, (uint32_t)rack, 1.0f) == BRACK_OK);
+                CHECK(brack_connect_audio(e, ids[rack], 0, 0, (uint32_t)rack) == BRACK_OK);
                 if (strcmp(arch, own) != 0 && !in_process) ++foreign;
                 build_of[rack] = b;
                 format_of[rack] = f;
@@ -808,6 +818,10 @@ static int run(int argc, char** argv) {
     CHECK(brack_get_master_gain(e) == 1.0f);
     CHECK(brack_set_master_gain(e, 0.25f) == BRACK_OK && brack_get_master_gain(e) == 0.25f);
     CHECK(brack_set_master_gain(e, -1.0f) == BRACK_ERR_INVALID_ARGUMENT);
+    CHECK(brack_get_master_mute(e) == 0);
+    CHECK(brack_set_master_mute(e, 1) == BRACK_OK && brack_get_master_mute(e) == 1);
+    CHECK(brack_get_master_gain(e) == 0.25f);
+    CHECK(brack_set_master_mute(e, 0) == BRACK_OK && brack_get_master_mute(e) == 0);
 
     CHECK(brack_remove_plugin(e, id) == BRACK_OK);
     CHECK(brack_remove_plugin(e, id) == BRACK_ERR_NOT_FOUND);

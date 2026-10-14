@@ -74,6 +74,13 @@ std::vector<float> settledPeaks(Engine& e, uint32_t total) {
 
 bool about(float value, float expected) { return std::fabs(value - expected) <= expected * 0.03f; }
 
+// A JSON string of `s`.
+std::string quoted(const std::string& s) {
+    std::string q = "\"";
+    for (char c : s) q += c == '\\' ? std::string("\\\\") : std::string(1, c);
+    return q + "\"";
+}
+
 std::vector<std::string> effectIds(const std::vector<EngineSnapshot::Plugin>& effects) {
     std::vector<std::string> ids;
     for (auto& p : effects) ids.push_back(p.id);
@@ -309,11 +316,6 @@ void effectLoadsAside(const std::string& synth, const std::string& gain) {
 
 // A session that leaves ids out, or gives an effect a taken one: every plugin gets an id of its own.
 void sessionIds(const std::string& synth, const std::string& gain) {
-    auto quoted = [](const std::string& s) {
-        std::string q = "\"";
-        for (char c : s) q += c == '\\' ? std::string("\\\\") : std::string(1, c);
-        return q + "\"";
-    };
     auto plugin = [&](const std::string& id, const std::string& path, const std::string& extra = "") {
         return "{" + (id.empty() ? "" : "\"id\": " + quoted(id) + ", ") + "\"path\": " + quoted(path) +
                ", \"name\": \"Gain\"" + extra + "}";
@@ -381,7 +383,7 @@ void meters(const std::string& synth, const std::string& gain) {
         CHECK(e.setConfig(cfg, err));
         CHECK(e.startManual(48000, 2, 256, err));
         CHECK(e.addPlugin({"s", synth, "brack.test.synth", "", std::nullopt}, true, err) == "s");
-        CHECK(e.setAudioRoutes("s", {{"s", 0, 0, 0, 1.0f}}, err));  // R is not routed
+        CHECK(e.setAudioRoutes("s", {{"s", 0, 0, 0}}, err));  // R is not routed
         CHECK(e.addMidiSource({"keys", MidiSourceKind::Api, ""}, err) == "keys");
         CHECK(e.addMidiRoute({"keys", "s", 0}, err));
         const uint8_t on[] = {0x90, 0x3C, 0x64}, cc[] = {0xB0, 0x07, 0x7F};
@@ -405,19 +407,25 @@ void meters(const std::string& synth, const std::string& gain) {
         e.refreshSnapshot();
         CHECK(e.cachedSnapshot().plugins[0].midiMessages == 3);
 
-        // Past full scale, in the chain: before the routes' gains, which bring it back under.
+        // Past full scale, in the chain; the instrument's volume brings it back under, and its
+        // meters read after the volume.
         CHECK(e.addEffect("s", 0, {"g", gain, "brack.test.gain", "", std::nullopt}, err) == "g");
         CHECK(e.setPluginState("g", gainState(8.0f), err));
-        CHECK(e.setAudioRoutes("s", {{"s", 0, 0, 0, 0.25f}}, err));
         settledPeaks(e, 4800);
         snap = e.snapshot();
-        const uint64_t clips = snap.plugins[0].outputLevels[0].clips;
         std::printf("  through 8x: %.3f, %llu blocks past full scale; the mix %.3f\n", snap.plugins[0].outputLevels[0].peak,
-                    (unsigned long long)clips, snap.masterInput[0].peak);
-        CHECK(snap.plugins[0].outputLevels[0].peak > 1.0f && clips > 0);
-        CHECK(snap.masterInput[0].peak < 1.0f && snap.masterInput[0].clips == 0);
+                    (unsigned long long)snap.plugins[0].outputLevels[0].clips, snap.masterInput[0].peak);
+        CHECK(snap.plugins[0].outputLevels[0].peak > 1.0f && snap.plugins[0].outputLevels[0].clips > 0);
+        CHECK(snap.masterInput[0].clips > 0);
+        CHECK(e.setPluginGain("s", 0.25f));
         settledPeaks(e, 4800);
-        CHECK(e.snapshot().plugins[0].outputLevels[0].clips > clips);
+        snap = e.snapshot();
+        const uint64_t clips = snap.plugins[0].outputLevels[0].clips, mixClips = snap.masterInput[0].clips;
+        std::printf("  at 0.25: %.3f; the mix %.3f\n", snap.plugins[0].outputLevels[0].peak, snap.masterInput[0].peak);
+        CHECK(snap.plugins[0].outputLevels[0].peak < 1.0f && snap.masterInput[0].peak < 1.0f);
+        settledPeaks(e, 4800);
+        snap = e.snapshot();
+        CHECK(snap.plugins[0].outputLevels[0].clips == clips && snap.masterInput[0].clips == mixClips);
 
         // The master's effect halves the mix: its input and output.
         CHECK(e.addEffect("", 0, {"mg", gain, "brack.test.gain", "", std::nullopt}, err) == "mg");
@@ -434,7 +442,78 @@ void meters(const std::string& synth, const std::string& gain) {
         const EngineSnapshot::Plugin& idle = snap.plugins[0];
         CHECK(idle.outputLevels[0].peak == 0 && idle.load.average == 0 && idle.load.peak == 0);
         CHECK(snap.output[0].peak == 0 && snap.masterOutput[0].peak == 0 && snap.load.average == 0 && snap.masterLoad.peak == 0);
-        CHECK(idle.outputLevels[0].clips > clips);
+        CHECK(idle.outputLevels[0].clips == clips);
+    }
+}
+
+// An instrument's volume after its chain: a gain, and a mute that silences it while it plays on;
+// both kept by a session. An older session's route gains give the instrument their loudest.
+void volume(const std::string& synth, const std::string& gain) {
+    std::printf("volume\n");
+    std::string session;
+    {
+        Engine e;
+        std::string err;
+        CHECK(e.addPlugin({"s", synth, "brack.test.synth", "", std::nullopt}, true, err) == "s");
+        CHECK(e.addEffect("s", 0, {"g", gain, "brack.test.gain", "", std::nullopt}, err) == "g");
+        CHECK(e.startManual(48000, 2, 256, err));
+        const uint8_t on[] = {0x90, 0x3C, 0x64}, modulation[] = {0xB0, 0x01, 0x40};
+        CHECK(e.sendMidiToPlugin("s", 0, on, 3) == MidiSend::Sent);
+        const float full = settledPeaks(e, 4800)[0];
+
+        CHECK(e.setPluginGain("s", 0.5f));
+        const float half = settledPeaks(e, 4800)[0];
+        EngineSnapshot snap = e.snapshot();
+        std::printf("  at 1: %.3f, at 0.5: %.3f, metered %.3f\n", full, half, snap.plugins[0].outputLevels[0].peak);
+        CHECK(full > 0.05f && about(half, full * 0.5f) && about(snap.plugins[0].outputLevels[0].peak, half));
+        CHECK(snap.plugins[0].gain == 0.5f && !snap.plugins[0].mute);
+
+        CHECK(e.setPluginMute("s", true));
+        const uint64_t taken = snap.plugins[0].midiMessages;
+        CHECK(e.sendMidiToPlugin("s", 0, modulation, 3) == MidiSend::Sent);
+        CHECK(settledPeaks(e, 4800)[0] == 0.0f);
+        snap = e.snapshot();
+        CHECK(snap.plugins[0].mute && snap.plugins[0].gain == 0.5f && snap.plugins[0].active);
+        CHECK(snap.plugins[0].outputLevels[0].peak < half * 0.5f);  // falling, as after any sound
+        CHECK(snap.plugins[0].midiMessages == taken + 1);
+        CHECK(e.setPluginMute("s", false));
+        CHECK(about(settledPeaks(e, 4800)[0], half));
+
+        // The master's mute silences everything, keeping the master gain.
+        e.setMasterMute(true);
+        CHECK(settledPeaks(e, 4800)[0] == 0.0f);
+        snap = e.snapshot();
+        CHECK(snap.masterMute && snap.masterGain == 1.0f && e.cachedSnapshot().masterMute);
+        e.setMasterMute(false);
+        CHECK(about(settledPeaks(e, 4800)[0], half));
+
+        CHECK(!e.setPluginGain("s", -1.0f) && !e.setPluginGain("s", std::nanf("")));
+        CHECK(!e.setPluginGain("nope", 1.0f) && !e.setPluginMute("nope", true));
+        CHECK(!e.setPluginGain("g", 1.0f) && !e.setPluginMute("g", true));  // an effect
+        CHECK(e.setPluginMute("s", true));
+        e.setMasterMute(true);
+        session = e.saveSessionJson();
+    }
+    {
+        Engine e;
+        std::string err;
+        CHECK(e.loadSessionJson(session, err));
+        const EngineSnapshot snap = e.snapshot();
+        CHECK(snap.plugins.size() == 1 && snap.plugins[0].gain == 0.5f && snap.plugins[0].mute && snap.masterMute);
+        CHECK(e.saveSessionJson() == session);
+    }
+    {
+        Engine e;
+        std::string err;
+        const std::string old = R"({"format": "brack-session", "plugins": [{"id": "s", "path": )" + quoted(synth) +
+                                R"(}, {"id": "t", "path": )" + quoted(synth) + R"(}], "audioRoutes": [)"
+                                R"({"plugin": "s", "port": 0, "channel": 0, "output": 0, "gain": 0.25},)"
+                                R"({"plugin": "s", "port": 0, "channel": 1, "output": 1, "gain": 0.5},)"
+                                R"({"plugin": "t", "port": 0, "channel": 0, "output": 0}]})";
+        CHECK(e.loadSessionJson(old, err));
+        const EngineSnapshot snap = e.snapshot();
+        CHECK(snap.plugins.size() == 2 && snap.plugins[0].gain == 0.5f && snap.plugins[1].gain == 1.0f);
+        CHECK(snap.audioRoutes.size() == 3);
     }
 }
 
@@ -529,7 +608,7 @@ int run(int argc, char** argv) {
         CHECK(e.sendMidiToSource("keys", off, 3) == MidiSend::Sent);
 
         // Audio routing: send plugin "a" to output 1 only.
-        CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 1, 1.0f}}, err));
+        CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 1}}, err));
         CHECK(e.setAudioRoutes("b", {}, err));
         session = e.saveSessionJson();
         e.stop();
@@ -639,6 +718,7 @@ int run(int argc, char** argv) {
     effectLoadsAside(synth, argv[2]);
     midiWhileChanging(synth, argv[2]);
     meters(synth, argv[2]);
+    volume(synth, argv[2]);
 
     std::printf(g_failures ? "FAILED (%d)\n" : "PASS\n", g_failures);
     return g_failures ? 1 : 0;

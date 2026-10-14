@@ -8,7 +8,7 @@ namespace Brack;
 public static unsafe class BrackLibrary
 {
     /// <summary>The C API version this binding was written against (BRACK_API_VERSION).</summary>
-    public const uint BindingApiVersion = 2;
+    public const uint BindingApiVersion = 3;
 
     private static readonly Lock s_lock = new();
     private static Action<BrackLogLevel, string>? s_log;

@@ -171,6 +171,9 @@ int RunTests()
         engine.MasterGain = 0.25f;
         Check(engine.MasterGain == 0.25f, "master gain");
         Throws(BrackErrorCode.InvalidArgument, () => engine.MasterGain = -1, "a negative gain");
+        engine.MasterMute = true;
+        Check(engine.MasterMute && engine.MasterGain == 0.25f && engine.GetStatus().MasterMute, "master mute");
+        engine.MasterMute = false;
     }
 
     // Changes, events, and a plugin crashing on the audio thread.
@@ -218,6 +221,14 @@ int RunTests()
         Check(Peak(engine, 4800) == 0, "unrouted plugin is silent");
         engine.ConnectAudio("b", 0, 0, 0);
         Check(Peak(engine, 4800) > 0.1f, "routed");
+        engine.SetPluginGain("b", 0.5f);
+        engine.SetPluginMute("b", true);
+        Peak(engine, 512);
+        Check(Peak(engine, 4800) == 0, "a muted instrument is silent");
+        Check(engine.GetStatus().Plugins.Single(p => p.Id == "b") is { Gain: 0.5f, Mute: true }, "its volume");
+        engine.SetPluginMute("b", false);
+        Throws(BrackErrorCode.NotFound, () => engine.SetPluginGain("nope", 1), "the gain of an unknown instrument");
+        Throws(BrackErrorCode.InvalidArgument, () => engine.SetPluginGain("b", -1), "a negative instrument gain");
         Check(engine.DisconnectAudio("b", 0, 0, 0) && !engine.DisconnectAudio("b", 0, 0, 0), "disconnect once");
         Check(ThrowsArgument(() => engine.ConnectAudio("b", -1, 0, 0)), "a negative port is refused");
         Check(ThrowsArgument(() => engine.Render([new float[16], new float[16]], 17)), "frames past the arrays are refused");

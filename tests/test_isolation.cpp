@@ -136,8 +136,8 @@ void goesDown(const std::string& synth, const Kind& kind) {
     start(e);
     CHECK(e.addPlugin({"a", synth, "brack.test.synth", "", std::nullopt}, false, err) == "a");
     CHECK(e.addPlugin({"c", synth, "brack.test.synth", "", std::nullopt}, false, err) == "c");
-    CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 0, 1.0f}}, err));
-    CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 1, 1.0f}}, err));
+    CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 0}}, err));
+    CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 1}}, err));
     e.saveSessionJson();  // the state "c" keeps once it is gone
     if (kind.editor) CHECK(e.setPluginGuiVisible("c", true, err));
 

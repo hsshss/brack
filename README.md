@@ -46,14 +46,14 @@ The menu on the left switches between **Rack**, **Routing**, **Audio settings** 
 1. In **Rack**, add instruments with "Add instrument". The list shows the instruments found on the computer, and you can filter it by name or vendor. To load one that is not in the list, choose its file with "From file...".
 2. Under MIDI INPUTS at the bottom of **Rack**, add MIDI inputs (ports of connected devices, or virtual ports that Brack creates).
 3. In the **Routing** table, check which inputs go to which instruments. Below it, choose which output channels each instrument output goes to. A new instrument starts connected to outputs 1 and 2.
-4. Set the volume of each output channel with the faders in the instrument's panel in **Rack** (double-click for 0 dB).
+4. Set each instrument's volume with the VOLUME fader in its panel in **Rack** (all the way left is silent, double-click for 0 dB). Clicking the speaker left of the fader silences the instrument, which goes on taking MIDI and playing (click again to unmute).
 5. Change the output device and the sample rate in **Audio settings**. Changes take effect when you click "Apply".
 
 - The "Editor" button opens an instrument's own window.
 - "Add effect" in an instrument's panel adds an effect to that instrument. Effects apply from top to bottom. Add effects for the mix of all the instruments under MASTER.
 - Unchecking the box left of an effect's name plays without that effect. Drag effects to reorder them.
 - An effect must be built for the instrument's architecture (under MASTER, for Brack's).
-- The "MASTER" fader at the top sets the overall volume (all the way left mutes, double-click for 0 dB).
+- The "MASTER" fader at the top sets the overall volume (all the way left mutes, double-click for 0 dB). The speaker left of it mutes everything, keeping the volume.
 - To rename an instrument, double-click its name or use "Rename" in the "..." menu. Drag instruments and MIDI inputs to reorder them.
 - "Copy all" in **Log** copies the log to the clipboard.
 

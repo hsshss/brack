@@ -368,11 +368,11 @@ void Engine::publishGraph() {
         const bool processed = (p->change == Change::None || p->change == Change::Stopping) && p->chain && p->chain->isActive();
         if (!processed && !changing) continue;
         RtGraph::Node n{processed ? p->chain.get() : nullptr, p->direct.get(), p->pending.get(), p->events.get(),
-                        p->meters.get(), changing, {}, {}};
+                        p->meters.get(), p->volume.get(), changing, {}, {}};
         if (const HostedPlugin* inst = processed ? p->instrument() : nullptr)
             for (auto& port : inst->audioOutputs()) n.portChannels.push_back(port.channels);
         for (auto& r : audioRoutes_)
-            if (processed && r.plugin == p->cfg.id && r.output < outChannels_) n.outs.push_back({r.port, r.channel, r.output, r.gain});
+            if (processed && r.plugin == p->cfg.id && r.output < outChannels_) n.outs.push_back({r.port, r.channel, r.output});
         nodeIndex[p->cfg.id] = (uint32_t)g->nodes.size();
         g->nodes.push_back(std::move(n));
     }
@@ -561,7 +561,8 @@ void Engine::render(float* const* out, uint32_t channels, uint32_t frames) {
     }
 
     // Master gain, ramped across the buffer when it changed so a move does not click.
-    const float g1 = masterGain_.load(std::memory_order_relaxed), g0 = masterApplied_;
+    const float g1 = masterMute_.load(std::memory_order_relaxed) ? 0.0f : masterGain_.load(std::memory_order_relaxed);
+    const float g0 = masterApplied_;
     if (g0 != g1) {
         const float step = (g1 - g0) / (float)frames;
         for (uint32_t c = 0; c < ch; ++c)
@@ -644,16 +645,21 @@ void Engine::processBlock(RtGraph& g, uint32_t frames) {
         if (!n.chain) continue;
         const bool ok = n.chain->endProcess();
         n.meters->load.add((float)(n.chain->processNs() / blockNs), frames, procRate_, now);
-        size_t m = 0;  // what the chain puts out, before the routes' gains
+        // Its volume, ramped across the block from where the last ended; the meters read after it.
+        const float g0 = n.volume->applied, g1 = n.volume->target();
+        n.volume->applied = g1;
+        const float step = (g1 - g0) / (float)frames;
+        const bool silent = !ok || (g0 == 0.0f && g1 == 0.0f);
+        size_t m = 0;
         for (uint32_t port = 0; port < n.portChannels.size(); ++port)
             for (uint32_t c = 0; c < n.portChannels[port] && m < ChainMeters::kChannels; ++c, ++m)
-                n.meters->out[m].update(ok ? n.chain->outputChannel(port, c) : nullptr, frames, fall, now);
-        if (!ok) continue;
+                n.meters->out[m].update(silent ? nullptr : n.chain->outputChannel(port, c), frames, fall, now, g0, step);
+        if (silent) continue;
         for (auto& o : n.outs) {
             const float* src = n.chain->outputChannel(o.port, o.channel);
             if (!src) continue;
             float* dst = mix_[o.output].data();
-            for (uint32_t i = 0; i < frames; ++i) dst[i] += src[i] * o.gain;
+            for (uint32_t i = 0; i < frames; ++i) dst[i] += src[i] * (g0 + step * (float)(i + 1));
         }
     }
     if (g.muteMix)
@@ -886,10 +892,10 @@ std::string Engine::installPlugin(std::unique_ptr<PluginSlot> slot, bool stateRe
         const uint32_t port = mainPort(outs);
         uint32_t chs = outs[port].channels;
         if (chs == 1) {
-            audioRoutes_.push_back({cfg.id, port, 0, 0, 1.0f});
-            audioRoutes_.push_back({cfg.id, port, 0, 1, 1.0f});
+            audioRoutes_.push_back({cfg.id, port, 0, 0});
+            audioRoutes_.push_back({cfg.id, port, 0, 1});
         } else {
-            for (uint32_t c = 0; c < std::min<uint32_t>(chs, 2); ++c) audioRoutes_.push_back({cfg.id, port, c, c, 1.0f});
+            for (uint32_t c = 0; c < std::min<uint32_t>(chs, 2); ++c) audioRoutes_.push_back({cfg.id, port, c, c});
         }
     }
     const std::string id = cfg.id;
@@ -1182,6 +1188,34 @@ bool Engine::setPluginState(const std::string& id, const std::vector<uint8_t>& s
     });
     if (ok) markChanged();
     return ok;
+}
+
+bool Engine::setPluginGain(std::string_view id, float gain) {
+    if (!(gain >= 0.0f) || !std::isfinite(gain)) return false;
+    {
+        std::shared_lock lock(injectMutex_);
+        auto it = injectPlugins_.find(id);
+        if (it == injectPlugins_.end()) return false;
+        it->second->volume->gain.store(gain, std::memory_order_relaxed);
+    }
+    markChanged();
+    return true;
+}
+
+bool Engine::setPluginMute(std::string_view id, bool mute) {
+    {
+        std::shared_lock lock(injectMutex_);
+        auto it = injectPlugins_.find(id);
+        if (it == injectPlugins_.end()) return false;
+        it->second->volume->mute.store(mute, std::memory_order_relaxed);
+    }
+    markChanged();
+    return true;
+}
+
+void Engine::setMasterMute(bool mute) {
+    masterMute_.store(mute, std::memory_order_relaxed);
+    markChanged();
 }
 
 bool Engine::setMasterGain(float gain) {
@@ -1554,33 +1588,27 @@ bool Engine::setAudioRoutes(const std::string& plugin, const std::vector<AudioRo
     return ok;
 }
 
-namespace {
-bool sameAudioRoute(const AudioRoute& a, const AudioRoute& b) {
-    return a.plugin == b.plugin && a.port == b.port && a.channel == b.channel && a.output == b.output;
-}
-}  // namespace
-
 bool Engine::addAudioRoute(const AudioRoute& r, std::string& error) {
-    bool ok = false;
+    bool ok = false, added = false;
     host_->invoke([&] {
         if (!findPlugin(r.plugin)) {
             error = "no such plugin: " + r.plugin;
             return;
         }
-        auto it = std::find_if(audioRoutes_.begin(), audioRoutes_.end(), [&](auto& x) { return sameAudioRoute(x, r); });
-        if (it != audioRoutes_.end()) it->gain = r.gain;
-        else audioRoutes_.push_back(r);
-        if (mode_ != EngineMode::Stopped) publishGraph();
         ok = true;
+        if (std::find(audioRoutes_.begin(), audioRoutes_.end(), r) != audioRoutes_.end()) return;
+        audioRoutes_.push_back(r);
+        added = true;
+        if (mode_ != EngineMode::Stopped) publishGraph();
     });
-    if (ok) markChanged();
+    if (added) markChanged();
     return ok;
 }
 
 bool Engine::removeAudioRoute(const AudioRoute& r) {
     bool ok = false;
     host_->invoke([&] {
-        auto it = std::find_if(audioRoutes_.begin(), audioRoutes_.end(), [&](auto& x) { return sameAudioRoute(x, r); });
+        auto it = std::find(audioRoutes_.begin(), audioRoutes_.end(), r);
         if (it == audioRoutes_.end()) return;
         audioRoutes_.erase(it);
         if (mode_ != EngineMode::Stopped) publishGraph();
@@ -1660,6 +1688,7 @@ EngineSnapshot Engine::cachedSnapshot() const {
     }
     // Live values, so meters move even while the host thread is busy.
     s.masterGain = masterGain_.load();
+    s.masterMute = masterMute_.load();
     s.deviceStalled = s.mode == EngineMode::Device && clockActive_.load();
     readMeters(s, meters);
     return s;
@@ -1700,6 +1729,8 @@ void Engine::readMeters(EngineSnapshot& s, const SnapshotMeters& meters) const {
         p.outputLevels = levels(m.out, channels);
         p.load = load(m.load);
         p.midiMessages = m.midi.load(relaxed);
+        p.gain = meters.volumes[i]->gain.load(relaxed);
+        p.mute = meters.volumes[i]->mute.load(relaxed);
     }
 }
 
@@ -1717,6 +1748,7 @@ EngineSnapshot Engine::buildSnapshot(SnapshotMeters& meters) const {
         s.deviceStalled = mode_ == EngineMode::Device && clockActive_.load();
         s.resamplerLatencyMs = resampler_ ? resampler_->latencyInputFrames() * 1000.0 / procRate_ : 0.0;
         s.masterGain = masterGain_.load();
+        s.masterMute = masterMute_.load();
         // One plugin: `inst` (null if not loaded) is the chain's plugin at `index`.
         auto plugin = [](const PluginSlot& slot, const PluginConfig& cfg, const std::string& status,
                          const HostedPlugin* inst, size_t index) {
@@ -1762,6 +1794,7 @@ EngineSnapshot Engine::buildSnapshot(SnapshotMeters& meters) const {
             sp.effects = effects(*p);
             s.plugins.push_back(std::move(sp));
             meters.plugins.push_back(p->meters);
+            meters.volumes.push_back(p->volume);
         }
         s.masterEffects = effects(*master_);
         meters.master = master_->meters;

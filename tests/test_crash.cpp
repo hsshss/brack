@@ -91,8 +91,8 @@ void effectCrashes(const std::string& synth, const std::string& gain) {
         CHECK(e.startManual(48000, 2, 256, err));
         CHECK(e.addPlugin({"a", synth, "brack.test.synth", "", std::nullopt}, false, err) == "a");
         CHECK(e.addPlugin({"c", synth, "brack.test.synth", "", std::nullopt}, false, err) == "c");
-        CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 0, 1.0f}}, err));
-        CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 1, 1.0f}}, err));
+        CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 0}}, err));
+        CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 1}}, err));
         CHECK(e.addEffect("c", 0, {"x", gain, "brack.test.gain", "", std::nullopt}, err) == "x");
         const uint8_t on[] = {0x90, 0x3C, 0x64};
         CHECK(e.sendMidiToPlugin("a", 0, on, 3) == MidiSend::Sent);
@@ -148,7 +148,7 @@ void effectCrashesLoading(const std::string& synth, const std::string& gain) {
         CHECK(e.setConfig(cfg, err));
         CHECK(e.startManual(48000, 2, 256, err));
         CHECK(e.addPlugin({"c", synth, "brack.test.synth", "", std::nullopt}, false, err) == "c");
-        CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 0, 1.0f}}, err));
+        CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 0}}, err));
         err.clear();
         CHECK(e.addEffect("c", 0, {"y", gain, "brack.test.gain", "", gainState(-1000.0f)}, err).empty());
         std::printf("  %s\n", err.c_str());
@@ -173,7 +173,7 @@ void masterCrashesAgain(const std::string& synth, const std::string& gain) {
     CHECK(e.setConfig(cfg, err));
     CHECK(e.startManual(48000, 2, 256, err));
     CHECK(e.addPlugin({"c", synth, "brack.test.synth", "", std::nullopt}, false, err) == "c");
-    CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 0, 1.0f}}, err));
+    CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 0}}, err));
     for (const std::string id : {"m1", "m2"}) {
         CHECK(e.addEffect("", 0, {id, gain, "brack.test.gain", "", std::nullopt}, err) == id);
         const uint8_t on[] = {0x90, 0x3C, 0x64};
@@ -328,8 +328,8 @@ int run(int argc, char** argv) {
         uint64_t changes = e.changeCount();
         CHECK(e.addPlugin({"a", synth, "brack.test.synth", "", std::nullopt}, false, err) == "a");
         CHECK(e.addPlugin({"c", synth, "brack.test.synth", "", std::nullopt}, false, err) == "c");
-        CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 0, 1.0f}}, err));  // a -> output 1
-        CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 1, 1.0f}}, err));  // c -> output 2
+        CHECK(e.setAudioRoutes("a", {{"a", 0, 0, 0}}, err));  // a -> output 1
+        CHECK(e.setAudioRoutes("c", {{"c", 0, 0, 1}}, err));  // c -> output 2
         CHECK(e.changeCount() >= changes + 4);
         changes = e.changeCount();
         e.snapshot();
@@ -399,7 +399,7 @@ int run(int argc, char** argv) {
 
         // A new instance of the same plugin still works.
         CHECK(e.addPlugin({"b", synth, "brack.test.synth", "", std::nullopt}, false, err) == "b");
-        CHECK(e.setAudioRoutes("b", {{"b", 0, 0, 1, 1.0f}}, err));
+        CHECK(e.setAudioRoutes("b", {{"b", 0, 0, 1}}, err));
         CHECK(e.sendMidiToPlugin("b", 0, on, 3) == MidiSend::Sent);
         CHECK(renderPeaks(e, 4800)[1] > 0.1f);
 

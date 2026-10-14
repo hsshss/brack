@@ -86,6 +86,19 @@ void drawIcon(ImDrawList* dl, Icon icon, ImVec2 pos, float size, ImU32 col) {
             poly({{20, 16}}, false);
             poly({{20, 20}, {20, 16}, {16, 16}}, false);
             break;
+        case Icon::Speaker:
+        case Icon::SpeakerMuted:
+            poly({{3, 9}, {7, 9}, {12, 5}, {12, 19}, {7, 15}, {3, 15}}, true);
+            if (icon == Icon::SpeakerMuted) {
+                line(16, 9, 22, 15);
+                line(22, 9, 16, 15);
+            } else {
+                arc(13, 12, 4, -50, 50);
+                dl->PathStroke(col, 0, w);
+                arc(13, 12, 8, -50, 50);
+                dl->PathStroke(col, 0, w);
+            }
+            break;
         case Icon::More:
             for (float x : {5.0f, 12.0f, 19.0f}) dot(x, 12, 1.7f);
             break;
@@ -327,8 +340,8 @@ bool checkbox(const char* label, bool& on, float height, float fontSize) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 b(p.x, p.y + (h - px(kCheckBox)) * 0.5f), c(b.x + px(kCheckBox), b.y + px(kCheckBox));
     if (on) {
-        dl->AddRectFilled(b, c, tint(col::midi), px(4));
-        drawIcon(dl, Icon::Check, ImVec2(b.x + px(2), b.y + px(2)), px(12), col::onMidi);
+        dl->AddRectFilled(b, c, tint(col::audio), px(4));
+        drawIcon(dl, Icon::Check, ImVec2(b.x + px(2), b.y + px(2)), px(12), col::onAudio);
     } else {
         if (hovered) dl->AddRectFilled(b, c, tint(col::raised), px(4));
         dl->AddRect(b, c, tint(col::borderStrong), px(4));
@@ -336,6 +349,17 @@ bool checkbox(const char* label, bool& on, float height, float fontSize) {
     const std::string_view text(label, size_t(ImGui::FindRenderedTextEnd(label) - label));
     if (!text.empty())
         drawText(ImVec2(c.x + px(kCheckGap), p.y + (h - px(fontSize)) * 0.5f), fonts.sans, fontSize, hovered ? col::text : col::text2, text);
+    return clicked;
+}
+
+bool muteToggle(const char* id, bool& muted, float height) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float h = px(height), s = px(18);
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(h, h));
+    if (clicked) muted = !muted;
+    const ImU32 c = ImGui::IsItemHovered() ? col::text : muted ? col::text3 : col::text2;
+    drawIcon(ImGui::GetWindowDrawList(), muted ? Icon::SpeakerMuted : Icon::Speaker,
+             ImVec2(p.x + std::round((h - s) * 0.5f), p.y + std::round((h - s) * 0.5f)), s, c);
     return clicked;
 }
 

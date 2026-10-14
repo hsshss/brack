@@ -2,6 +2,7 @@
 #include "brack/brack.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <mutex>
@@ -450,10 +451,10 @@ BRACK_API int BRACK_CALL brack_disconnect_midi(brack_engine* e, const char* sour
 }
 
 BRACK_API int BRACK_CALL brack_connect_audio(brack_engine* e, const char* pluginId, uint32_t port, uint32_t channel,
-                                             uint32_t output, float gain) {
+                                             uint32_t output) {
     return guarded(e, [&] {
         std::string err;
-        if (!e->engine.addAudioRoute({str(pluginId), port, channel, output, gain}, err))
+        if (!e->engine.addAudioRoute({str(pluginId), port, channel, output}, err))
             return fail(BRACK_ERR_NOT_FOUND, err);
         return ok();
     });
@@ -462,7 +463,7 @@ BRACK_API int BRACK_CALL brack_connect_audio(brack_engine* e, const char* plugin
 BRACK_API int BRACK_CALL brack_disconnect_audio(brack_engine* e, const char* pluginId, uint32_t port, uint32_t channel,
                                                 uint32_t output) {
     return guarded(e, [&] {
-        if (!e->engine.removeAudioRoute({str(pluginId), port, channel, output, 1.0f}))
+        if (!e->engine.removeAudioRoute({str(pluginId), port, channel, output}))
             return fail(BRACK_ERR_NOT_FOUND, "no such route");
         return ok();
     });
@@ -475,12 +476,31 @@ BRACK_API int BRACK_CALL brack_clear_audio_routes(brack_engine* e, const char* p
     });
 }
 
+BRACK_API int BRACK_CALL brack_set_plugin_gain(brack_engine* e, const char* pluginId, float gain) {
+    if (!e || !pluginId) return failLiteral(BRACK_ERR_INVALID_ARGUMENT, "invalid argument");
+    if (!(gain >= 0.0f) || !std::isfinite(gain)) return failLiteral(BRACK_ERR_INVALID_ARGUMENT, "gain must be >= 0");
+    return e->engine.setPluginGain(pluginId, gain) ? BRACK_OK : failLiteral(BRACK_ERR_NOT_FOUND, "no such instrument");
+}
+
+BRACK_API int BRACK_CALL brack_set_plugin_mute(brack_engine* e, const char* pluginId, int mute) {
+    if (!e || !pluginId) return failLiteral(BRACK_ERR_INVALID_ARGUMENT, "invalid argument");
+    return e->engine.setPluginMute(pluginId, mute != 0) ? BRACK_OK : failLiteral(BRACK_ERR_NOT_FOUND, "no such instrument");
+}
+
 BRACK_API int BRACK_CALL brack_set_master_gain(brack_engine* e, float gain) {
     if (!e) return failLiteral(BRACK_ERR_INVALID_ARGUMENT, "engine is NULL");
     return e->engine.setMasterGain(gain) ? BRACK_OK : failLiteral(BRACK_ERR_INVALID_ARGUMENT, "gain must be >= 0");
 }
 
 BRACK_API float BRACK_CALL brack_get_master_gain(brack_engine* e) { return e ? e->engine.masterGain() : 0.0f; }
+
+BRACK_API int BRACK_CALL brack_set_master_mute(brack_engine* e, int mute) {
+    if (!e) return failLiteral(BRACK_ERR_INVALID_ARGUMENT, "engine is NULL");
+    e->engine.setMasterMute(mute != 0);
+    return BRACK_OK;
+}
+
+BRACK_API int BRACK_CALL brack_get_master_mute(brack_engine* e) { return e && e->engine.masterMute() ? 1 : 0; }
 
 BRACK_API int BRACK_CALL brack_send_midi(brack_engine* e, const char* pluginId, uint32_t notePort, const uint8_t* data,
                                          uint32_t size) {

@@ -308,11 +308,11 @@ public sealed unsafe class BrackEngine : IDisposable
     }
 
     /// <summary>Routes channel <paramref name="channel"/> of the plugin's output port <paramref name="port"/> to engine
-    /// output <paramref name="output"/>; for a route that exists, sets its gain.</summary>
-    public void ConnectAudio(string pluginId, int port, int channel, int output, float gain = 1.0f)
+    /// output <paramref name="output"/>; a route that exists stays as it is.</summary>
+    public void ConnectAudio(string pluginId, int port, int channel, int output)
     {
         ThrowIfAnyNegative(port, channel, output);
-        Interop.Check(NativeMethods.brack_connect_audio(_handle, pluginId, (uint)port, (uint)channel, (uint)output, gain));
+        Interop.Check(NativeMethods.brack_connect_audio(_handle, pluginId, (uint)port, (uint)channel, (uint)output));
     }
 
     /// <summary>False if there was no such route.</summary>
@@ -331,11 +331,33 @@ public sealed unsafe class BrackEngine : IDisposable
 
     public void ClearAudioRoutes(string pluginId) => Interop.Check(NativeMethods.brack_clear_audio_routes(_handle, pluginId));
 
+    /// <summary>
+    /// An instrument's volume: a linear gain on its chain's output, before its audio routes (1 = unity). Its meters
+    /// read after it. Ramped; never waits for Brack's thread. NotFound for an id that is no instrument.
+    /// </summary>
+    public void SetPluginGain(string pluginId, float gain) =>
+        Interop.Check(NativeMethods.brack_set_plugin_gain(_handle, pluginId, gain));
+
+    /// <summary>
+    /// A muted instrument is silent whatever its gain, while it goes on playing and taking MIDI. Ramped; never waits
+    /// for Brack's thread. NotFound for an id that is no instrument.
+    /// </summary>
+    public void SetPluginMute(string pluginId, bool mute) =>
+        Interop.Check(NativeMethods.brack_set_plugin_mute(_handle, pluginId, mute ? 1 : 0));
+
     /// <summary>Linear gain on every output after the sample rate conversion (1 = unity). Ramped; never blocks.</summary>
     public float MasterGain
     {
         get => NativeMethods.brack_get_master_gain(_handle);
         set => Interop.Check(NativeMethods.brack_set_master_gain(_handle, value));
+    }
+
+    /// <summary>Silences every output whatever <see cref="MasterGain"/>, which it keeps, while the plugins play on.
+    /// Ramped; never blocks.</summary>
+    public bool MasterMute
+    {
+        get => NativeMethods.brack_get_master_mute(_handle) != 0;
+        set => Interop.Check(NativeMethods.brack_set_master_mute(_handle, value ? 1 : 0));
     }
 
     private static bool CheckFound(int result)
@@ -408,7 +430,7 @@ public sealed unsafe class BrackEngine : IDisposable
     public string SaveSessionJson() =>
         Interop.ReadText((buf, size, needed) => NativeMethods.brack_save_session_json(_handle, buf, size, needed));
 
-    /// <summary>Removes every plugin, MIDI source and route; the configuration and master gain stay.</summary>
+    /// <summary>Removes every plugin, MIDI source and route; the configuration and master volume stay.</summary>
     public void Clear() => Interop.Check(NativeMethods.brack_clear(_handle));
 
     /// <summary>Goes up whenever what a session saves changes (MIDI does not count). Compare with the value at the
@@ -490,11 +512,15 @@ public sealed unsafe class BrackEngine : IDisposable
     public EngineStatus GetStatus() => BrackJson.Parse(GetStatusJson(), BrackJson.Default.EngineStatus);
 
     public string GetStatusJson() =>
-        Interop.ReadText((buf, size, needed) => NativeMethods.brack_get_status(_handle, buf, size, needed));
+        Interop.ReadText((buf, size, needed) => NativeMethods.brack_get_status(_handle, buf, size, needed), ref _statusSize);
 
     /// <summary>The engine's state as of at most ~50 ms ago (meters current), without waiting.</summary>
     public EngineStatus GetCachedStatus() => BrackJson.Parse(GetCachedStatusJson(), BrackJson.Default.EngineStatus);
 
     public string GetCachedStatusJson() =>
-        Interop.ReadText((buf, size, needed) => NativeMethods.brack_get_status_cached(_handle, buf, size, needed));
+        Interop.ReadText((buf, size, needed) => NativeMethods.brack_get_status_cached(_handle, buf, size, needed),
+                         ref _statusSize);
+
+    /// <summary>The buffer the status needed last time, for the next.</summary>
+    private int _statusSize = 16 * 1024;
 }

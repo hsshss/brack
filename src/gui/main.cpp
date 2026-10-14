@@ -484,15 +484,20 @@ private:
 
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * (running ? 1.0f : 0.6f));
         drawText(row.next(textWidth(fonts.bold, 11, "MASTER"), px(11)), fonts.bold, 11, col::text3, "MASTER");
-        row.gap(12);
+        row.gap(8);
+        bool mute = snap_.masterMute;
+        row.place(px(24), px(24));
+        if (muteToggle("##masterMute", mute, 24)) {
+            engine_.setMasterMute(mute);
+            snap_.masterMute = mute;
+        }
+        ImGui::SetItemTooltip(mute ? "Muted (click to unmute): silent, while the instruments play on"
+                                   : "Mute: silent, while the instruments play on");
+        row.gap(4);
         row.place(px(220), px(24));
         const float db = masterFader(px(220));
         row.gap(12);
-        char value[32];
-        if (db <= kFaderMinDb) std::snprintf(value, sizeof value, "-inf dB");
-        else std::snprintf(value, sizeof value, "%.1f dB", db);
-        const ImVec2 vp = row.next(px(kDbValueWidth), px(12));
-        drawText(ImVec2(vp.x + px(kDbValueWidth) - textWidth(fonts.mono, 12, value), vp.y), fonts.mono, 12, col::text, value);
+        drawDb(row.next(px(kDbValueWidth), px(12)), db, snap_.masterMute ? col::text3 : col::text);
         ImGui::PopStyleVar();
 
         if (running && !snap_.output.empty()) {
@@ -543,10 +548,18 @@ private:
         return s;
     }
 
-    // The range of the volume faders (the master's and the routes'), and the width of the dB
+    // The range of the volume faders (the master's and the instruments'), and the width of the dB
     // value beside one.
     static constexpr float kFaderMinDb = -60.0f, kFaderMaxDb = 12.0f;
     static constexpr float kDbValueWidth = 56;
+
+    // A fader's value, right-aligned in the kDbValueWidth at `p`; the left end mutes.
+    void drawDb(ImVec2 p, float db, ImU32 color) {
+        char value[32];
+        if (db <= kFaderMinDb) std::snprintf(value, sizeof value, "-inf dB");
+        else std::snprintf(value, sizeof value, "%.1f dB", db);
+        drawText(ImVec2(p.x + px(kDbValueWidth) - textWidth(fonts.mono, 12, value), p.y), fonts.mono, 12, color, value);
+    }
 
     // Master volume in dB; the left end mutes. It applies at once (no worker round trip),
     // and the snapshot reads it live, so the fader never lags behind. Returns the dB shown.
@@ -561,18 +574,22 @@ private:
         return db;
     }
 
-    // `key`'s meters' clip counts when one of them was last clicked, for meters().
+    // `key`'s meters' clip counts when a meter was last clicked, for meters(); taken again from
+    // `levels` the first time they are drawn after a click.
     std::vector<uint64_t>& clipsSeen(const std::string& key, const std::vector<EngineSnapshot::Level>& levels) {
-        std::vector<uint64_t>& seen = clipSeen_[key];
-        seen.resize(levels.size());
-        for (size_t c = 0; c < levels.size(); ++c)
-            if (levels[c].clips < seen[c]) seen[c] = 0;  // a new meter (a plugin added again)
-        return seen;
+        ClipsSeen& seen = clipSeen_[key];
+        seen.clips.resize(levels.size());
+        for (size_t c = 0; c < levels.size(); ++c) {
+            if (seen.clears != clipClears_) seen.clips[c] = levels[c].clips;
+            else if (levels[c].clips < seen.clips[c]) seen.clips[c] = 0;  // a new meter (a plugin added again)
+        }
+        seen.clears = clipClears_;
+        return seen.clips;
     }
 
     // One bar for each of `count` channels of `levels` from `first` (up to 8) in a box w x h,
     // numbered while there is room. A bar's square lights while its channel has gone past full
-    // scale since a meter sharing `seen` (clipsSeen()) was clicked; a click clears all of `levels`.
+    // scale since a meter was clicked (clipsSeen()); a click clears every meter's.
     void meters(const std::vector<EngineSnapshot::Level>& levels, std::vector<uint64_t>& seen, size_t first, size_t count,
                 ImVec2 p, float w, float h) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -599,11 +616,13 @@ private:
         }
         ImGui::SetCursorScreenPos(p);
         ImGui::PushID(&seen);
-        if (ImGui::InvisibleButton("##meter", ImVec2(w, h)))
+        if (ImGui::InvisibleButton("##meter", ImVec2(w, h))) {
+            ++clipClears_;
             for (size_t c = 0; c < levels.size(); ++c) seen[c] = levels[c].clips;
+        }
         ImGui::PopID();
         if (past && ImGui::IsItemHovered())
-            ImGui::SetTooltip("Past full scale %llu times (click to clear)", (unsigned long long)past);
+            ImGui::SetTooltip("Past full scale %llu times (click to clear every meter's)", (unsigned long long)past);
     }
 
     void banners() {
@@ -728,7 +747,7 @@ private:
                 row.end(below);
             };
             if (!snap_.masterInput.empty() && !snap_.masterEffects.empty()) {
-                level("IN", snap_.masterInput, "masterInput", false, 0);
+                level("IN", snap_.masterInput, "masterInput", false, 2);
                 level("OUT", snap_.masterOutput, "masterOutput", true, 4);
             } else if (!snap_.masterInput.empty()) {
                 level("LEVEL", snap_.masterInput, "masterInput", false, 4);
@@ -1016,9 +1035,9 @@ private:
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * (p.crashed ? 0.55f : 1.0f));
         constexpr float indent = 30;  // the body, past the grip
         const float bodyX = x0 + px(indent), bodyW = width - px(indent);
-        auto bodyRow = [&](float maxWidth) {
+        auto bodyRow = [&](float maxWidth, float height = 24) {
             ImGui::SetCursorScreenPos(ImVec2(bodyX, ImGui::GetCursorScreenPos().y));
-            return Row(24, std::min(bodyW, maxWidth));
+            return Row(height, std::min(bodyW, maxWidth));
         };
         auto head = [&](Row& row, const char* label) {
             drawText(row.next(px(72), px(11)), fonts.bold, 11, col::text3, label);
@@ -1046,6 +1065,28 @@ private:
         if (!any) none(midi);
         midi.end(4);
 
+        {
+            // Before its routes: a mute and a fader. Both apply at once (no worker round trip),
+            // and the snapshot reads them live.
+            Row row = bodyRow(px(480));
+            head(row, "VOLUME");
+            bool mute = p.mute;
+            row.place(px(len::lineButton), px(len::lineButton));
+            if (muteToggle("##mute", mute, len::lineButton)) engine_.setPluginMute(p.id, mute);
+            ImGui::SetItemTooltip(mute ? "Muted (click to unmute): silent, while it goes on playing and taking MIDI"
+                                       : "Mute: silent, while it goes on playing and taking MIDI");
+            row.gap(4);
+            float db = p.gain > 0.0f ? std::max(20.0f * std::log10(p.gain), kFaderMinDb) : kFaderMinDb;
+            const ImVec2 vp = row.nextRight(px(kDbValueWidth), px(12));
+            row.gapRight(8);
+            const float fw = row.remaining();
+            row.place(fw, px(22));
+            if (dbFader("##gain", db, kFaderMinDb, kFaderMaxDb, fw, 14, col::faint))
+                engine_.setPluginGain(p.id, db <= kFaderMinDb ? 0.0f : std::pow(10.0f, db / 20.0f));
+            drawDb(vp, db, p.mute ? col::text3 : col::text2);
+            row.end(8);
+        }
+
         std::vector<AudioRoute> mine = routesOf(p.id);
         std::vector<std::string> labels;  // each channel's, in p.outputLevels' order
         float lw = px(48);                // the widest label's, so that the meters line up
@@ -1057,13 +1098,14 @@ private:
             }
         }
         std::vector<uint64_t>& seen = clipsSeen("plugin/" + p.id, p.outputLevels);
-        bool changed = false, first = true;
+        bool first = true;
         size_t level = 0;  // in p.outputLevels
         for (uint32_t port = 0; port < p.audioOutputs.size(); ++port) {
             for (uint32_t ch = 0; ch < p.audioOutputs[port].channels; ++ch, ++level) {
                 const std::string key = p.id + "/" + std::to_string(port) + "/" + std::to_string(ch);
                 ImGui::PushID(key.c_str());
-                Row row = bodyRow(px(480));
+                // An output's channels close together, as one.
+                Row row = bodyRow(px(480), 15);
                 head(row, first ? "AUDIO OUT" : "");
                 first = false;
                 auto it = findRoute(mine, port, ch);
@@ -1074,35 +1116,9 @@ private:
                 if (ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(lp, ImVec2(lp.x + lw, lp.y + px(12))))
                     ImGui::SetTooltip("%s, channel %u", p.audioOutputs[port].name.c_str(), ch + 1);
                 row.gap(8);
-                const ImVec2 mp = row.next(px(64), row.height());
-                meters(p.outputLevels, seen, level, 1, mp, px(64), row.height());
-                row.gap(8);
-                if (routed) {
-                    // While dragging, and until the snapshot catches up (a frame or more later),
-                    // show the edited value: the stale one would pull the thumb back.
-                    const float snapDb = 20.0f * std::log10(std::max(it->gain, 1e-4f));
-                    float db = key == gainKey_ ? gainDb_ : snapDb;
-                    const ImVec2 vp = row.nextRight(px(kDbValueWidth), px(12));
-                    row.gapRight(8);
-                    const float fw = row.remaining();
-                    row.place(fw, px(22));
-                    const bool moved = dbFader("##gain", db, kFaderMinDb, kFaderMaxDb, fw, 14, col::faint);
-                    if (moved) {
-                        it->gain = std::pow(10.0f, db / 20.0f);
-                        changed = true;
-                    }
-                    if (moved || ImGui::IsItemActive()) {
-                        gainKey_ = key;
-                        gainDb_ = db;
-                        gainEditTime_ = ImGui::GetTime();
-                    } else if (key == gainKey_ && (std::fabs(snapDb - gainDb_) < 0.05f || ImGui::GetTime() - gainEditTime_ > 0.5)) {
-                        gainKey_.clear();
-                    }
-                    char value[32];
-                    std::snprintf(value, sizeof value, "%.1f dB", db);
-                    drawText(ImVec2(vp.x + px(kDbValueWidth) - textWidth(fonts.mono, 12, value), vp.y), fonts.mono, 12, col::text2, value);
-                }
-                row.end();
+                const float mw = row.remaining();
+                meters(p.outputLevels, seen, level, 1, row.next(mw, row.height()), mw, row.height());
+                row.end(port + 1 == p.audioOutputs.size() && ch + 1 == p.audioOutputs[port].channels ? 6 : 0);
                 ImGui::PopID();
             }
         }
@@ -1110,15 +1126,9 @@ private:
             Row row = bodyRow(px(480));
             head(row, "AUDIO OUT");
             none(row);
-            row.end();
+            row.end(6);
         }
         effectRows(p.effects, p.id, p.architecture, bodyX, bodyW, p.loaded);
-        if (changed) {
-            runAsync("Routing", [this, id = p.id, mine] {
-                std::string err;
-                if (!engine_.setAudioRoutes(id, mine, err)) error(err);
-            });
-        }
         ImGui::PopStyleVar();
         endCard();
         spaceBelow(6);
@@ -1516,7 +1526,7 @@ private:
                 if (sel != was) {
                     if (sel == 0) std::erase_if(mine, [&](auto& r) { return r.port == port && r.channel == ch; });
                     else if (it != mine.end()) it->output = uint32_t(sel - 1);
-                    else mine.push_back({p.id, port, ch, uint32_t(sel - 1), 1.0f});
+                    else mine.push_back({p.id, port, ch, uint32_t(sel - 1)});
                     changed = true;
                 }
                 row.end(gap);
@@ -2191,11 +2201,13 @@ private:
     static int kindIndex(MidiSourceKind k) { return int(std::find(std::begin(kNewKinds), std::end(kNewKinds), k) - std::begin(kNewKinds)); }
     int newKind_ = 0, newInput_ = 0;
     std::string newVirtualName_ = "Brack", newApiId_ = "api";
-    std::string gainKey_;  // route gain fader being dragged ("plugin/port/channel")
-    float gainDb_ = 0;
-    double gainEditTime_ = 0;
     std::map<std::string, std::pair<uint64_t, double>> activity_;  // see receiving()
-    std::map<std::string, std::vector<uint64_t>> clipSeen_;        // a meter's clips when last clicked (meters())
+    struct ClipsSeen {
+        std::vector<uint64_t> clips;
+        uint64_t clears = 0;  // clipClears_ as they were last drawn
+    };
+    std::map<std::string, ClipsSeen> clipSeen_;  // meters' clips when one was last clicked (meters())
+    uint64_t clipClears_ = 0;                    // clicks on any meter
     double copiedAt_ = -10;  // when the log was copied
     float matrixHeight_ = 0;  // the MIDI matrix's height last frame
 

@@ -17,6 +17,7 @@ public sealed record EngineStatus(
     ResamplerQuality ResamplerQuality,
     double ResamplerLatencyMs,
     float MasterGain,
+    bool MasterMute,
     float CpuLoad,
     float CpuPeakLoad,
     ulong Overruns,
@@ -35,8 +36,8 @@ public sealed record EngineStatus(
     IReadOnlyList<AudioRoute> AudioRoutes);
 
 /// <summary>An instrument with its chain of effects, or an effect (whose own Effects are empty). The
-/// meters (the AudioOutputs' levels, Load to MidiMessages) are an instrument's; an effect's are empty
-/// or zero.</summary>
+/// volume (Gain and Mute) and the meters (the AudioOutputs' levels, after the volume; Load to MidiMessages)
+/// are an instrument's; an effect's are at unity, empty or zero.</summary>
 public sealed record PluginStatus(
     string Id,
     string Name,
@@ -57,6 +58,8 @@ public sealed record PluginStatus(
     IReadOnlyList<AudioPortInfo> AudioOutputs,
     bool Bypass,
     IReadOnlyList<PluginStatus> Effects,
+    float Gain,
+    bool Mute,
     float Load,
     float PeakLoad,
     ulong MidiMessages);
@@ -74,7 +77,7 @@ public sealed record MidiSourceStatus(string Id, MidiSourceKind Kind, string Nam
 
 public sealed record MidiRoute(string Source, string Plugin, uint NotePort);
 
-public sealed record AudioRoute(string Plugin, uint Port, uint Channel, uint Output, float Gain);
+public sealed record AudioRoute(string Plugin, uint Port, uint Channel, uint Output);
 
 /// <summary>A plugin a scan found.</summary>
 public sealed record PluginDescription(

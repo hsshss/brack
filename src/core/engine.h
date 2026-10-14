@@ -36,6 +36,7 @@
 
 namespace brack {
 
+struct ChainVolume;
 class HostThread;
 class MidiInputPort;
 class MidiQueue;
@@ -73,7 +74,7 @@ struct AudioRoute {
     uint32_t port = 0;     // plugin audio output port index
     uint32_t channel = 0;  // channel within that port
     uint32_t output = 0;   // engine output channel
-    float gain = 1.0f;
+    bool operator==(const AudioRoute&) const = default;
 };
 
 struct EngineConfig {
@@ -129,6 +130,7 @@ struct EngineSnapshot {
                                  // processing continues on brack's own clock until it returns
     double resamplerLatencyMs = 0;
     float masterGain = 1.0f;
+    bool masterMute = false;
     Load load;               // of render(), against the buffer it fills
     uint64_t overruns = 0;   // the device's callbacks, since it was opened, that took longer than their buffer lasts
     std::vector<Level> output;  // after the master gain
@@ -150,9 +152,11 @@ struct EngineSnapshot {
         uint32_t latency = 0;
         bool bypass = false;          // an effect's
         std::vector<Plugin> effects;  // an instrument's chain, in order
-        // An instrument's (an effect has none): its chain's output channels, port after port
-        // as audioOutputs lists them, before the routes' gains; its chain's load; the MIDI
+        // An instrument's (an effect has none): its volume; its chain's output channels, port
+        // after port as audioOutputs lists them, after the volume; its chain's load; the MIDI
         // messages it took (once each, however many of its note ports).
+        float gain = 1.0f;
+        bool mute = false;
         std::vector<Level> outputLevels;
         Load load;
         uint64_t midiMessages = 0;
@@ -236,13 +240,23 @@ public:
     bool addMidiRoute(const MidiRoute& r, std::string& error);
     bool removeMidiRoute(const MidiRoute& r);
     bool setAudioRoutes(const std::string& plugin, const std::vector<AudioRoute>& routes, std::string& error);
-    // One route more or less. Routes are told apart by plugin, port, channel and output (not gain).
+    // One route more or less; adding one that exists changes nothing.
     bool addAudioRoute(const AudioRoute& r, std::string& error);
     bool removeAudioRoute(const AudioRoute& r);
+    // An instrument's volume: a linear gain on its chain's output, before its routes (1 = unity),
+    // and whether it is muted (silent whatever the gain, while it plays on). Any thread, never
+    // waits for the host thread; takes effect on the next block with a ramp. False for an id that
+    // is no instrument, or a negative or NaN gain.
+    bool setPluginGain(std::string_view id, float gain);
+    bool setPluginMute(std::string_view id, bool mute);
     // Linear gain on every output channel, after the SRC (1 = unity, 0 = silent). Any
     // thread, takes effect on the next buffer with a ramp. False for a negative or NaN gain.
     bool setMasterGain(float gain);
     float masterGain() const { return masterGain_.load(std::memory_order_relaxed); }
+    // Silences every output channel whatever the master gain, which it keeps, while the plugins
+    // play on. Any thread, takes effect on the next buffer with a ramp.
+    void setMasterMute(bool mute);
+    bool masterMute() const { return masterMute_.load(std::memory_order_relaxed); }
 
     // ---- direct MIDI injection (any thread, never blocks on the engine) ----
     // One complete MIDI 1.0 message per call (SysEx as F0..F7), delivered unchanged.
@@ -282,7 +296,7 @@ public:
     EngineSnapshot snapshot() const;
     // The latest snapshot without waiting for the host thread, which may be busy
     // (loading a plugin, say). Refreshed there every ~50 ms and by refreshSnapshot();
-    // meters and the stall flag are always current. For UIs that must not block.
+    // meters, the volumes and the stall flag are always current. For UIs that must not block.
     EngineSnapshot cachedSnapshot() const;
     void refreshSnapshot();
     // Any thread. Goes up whenever what saveSessionJson() would write changes: the rack, the
@@ -408,6 +422,7 @@ private:
     // The chains' meters a snapshot shows: its instruments', in its order, and the master's.
     struct SnapshotMeters {
         std::vector<std::shared_ptr<const ChainMeters>> plugins;
+        std::vector<std::shared_ptr<const ChainVolume>> volumes;  // the plugins', read live too
         std::shared_ptr<const ChainMeters> master;
     };
     // Host thread: all but the meters, which readMeters() fills in on any thread.
@@ -500,6 +515,7 @@ private:
     std::atomic<int64_t> callbackGapNs_{0};   // cadence_.longestGapNs(), for stallNs() on other threads
 
     std::atomic<float> masterGain_{1.0f};
+    std::atomic<bool> masterMute_{false};
     std::atomic<uint64_t> changeSeq_{0};  // see changeCount()
 
     // events

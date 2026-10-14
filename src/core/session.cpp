@@ -1,5 +1,8 @@
 // Session (de)serialisation for the engine.
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <sstream>
 
@@ -29,6 +32,7 @@ std::string Engine::saveSessionJson() {
                       {"bufferFrames", config_.audio.bufferFrames},
                       {"exclusive", config_.audio.exclusive}};
         j["masterGain"] = masterGain_.load();
+        j["masterMute"] = masterMute_.load();
         json sources = json::array();
         for (auto& s : sources_)
             sources.push_back({{"id", s->cfg.id}, {"kind", midiSourceKindName(s->cfg.kind)}, {"name", s->cfg.name}});
@@ -56,6 +60,8 @@ std::string Engine::saveSessionJson() {
         json plugins = json::array();
         for (auto& p : plugins_) {
             json jp = plugin(p->cfg, p->instrument());
+            jp["gain"] = p->volume->gain.load();
+            jp["mute"] = p->volume->mute.load();
             if (!p->effects.empty()) jp["effects"] = effects(*p);
             plugins.push_back(jp);
         }
@@ -67,7 +73,7 @@ std::string Engine::saveSessionJson() {
         j["midiRoutes"] = mr;
         json ar = json::array();
         for (auto& r : audioRoutes_)
-            ar.push_back({{"plugin", r.plugin}, {"port", r.port}, {"channel", r.channel}, {"output", r.output}, {"gain", r.gain}});
+            ar.push_back({{"plugin", r.plugin}, {"port", r.port}, {"channel", r.channel}, {"output", r.output}});
         j["audioRoutes"] = ar;
     });
     return j.dump(2);
@@ -111,10 +117,13 @@ namespace {
 struct SessionData {
     EngineConfig config;
     float masterGain = 1.0f;
+    bool masterMute = false;
     std::vector<MidiSourceConfig> sources;
     struct Plugin {
         PluginConfig cfg;
         std::vector<Engine::EffectSlot> effects;
+        float gain = 1.0f;
+        bool mute = false;
     };
     std::vector<Plugin> plugins;
     std::vector<Engine::EffectSlot> masterEffects;
@@ -152,6 +161,7 @@ bool parseSession(const std::string& text, SessionData& out, std::string& error)
         s.config.audio.bufferFrames = ja.value("bufferFrames", 256u);
         s.config.audio.exclusive = ja.value("exclusive", false);
         s.masterGain = j.value("masterGain", 1.0f);
+        s.masterMute = j.value("masterMute", false);
     } catch (const std::exception& e) {
         error = std::string("invalid session settings: ") + e.what();
         return false;
@@ -190,20 +200,35 @@ bool parseSession(const std::string& text, SessionData& out, std::string& error)
             }
             return out;
         };
-        for (auto& jp : j.value("plugins", json::array()))
-            s.plugins.push_back({plugin(jp), effects(jp.value("effects", json::array()))});
-        s.masterEffects = effects(j.value("masterEffects", json::array()));
-        for (auto& jr : j.value("midiRoutes", json::array()))
-            s.midiRoutes.push_back({jr.value("source", ""), jr.value("plugin", ""), (uint16_t)jr.value("notePort", 0)});
+        // An older session has a gain on each audio route instead: an instrument takes its routes'
+        // loudest.
+        std::map<std::string, float> routeGains;
         for (auto& jr : j.value("audioRoutes", json::array())) {
             AudioRoute r;
             r.plugin = jr.value("plugin", "");
             r.port = jr.value("port", 0u);
             r.channel = jr.value("channel", 0u);
             r.output = jr.value("output", 0u);
-            r.gain = jr.value("gain", 1.0f);
+            if (jr.contains("gain")) {
+                const float g = jr["gain"].get<float>();
+                if (auto [it, fresh] = routeGains.try_emplace(r.plugin, g); !fresh) it->second = std::max(it->second, g);
+            }
             s.audioRoutes.push_back(std::move(r));
         }
+        for (auto& jp : j.value("plugins", json::array())) {
+            SessionData::Plugin p{plugin(jp), effects(jp.value("effects", json::array()))};
+            auto old = routeGains.find(p.cfg.id);
+            p.gain = jp.value("gain", old != routeGains.end() ? old->second : 1.0f);
+            if (!(p.gain >= 0.0f) || !std::isfinite(p.gain)) {
+                s.problems.push_back("invalid gain for " + p.cfg.id);
+                p.gain = 1.0f;
+            }
+            p.mute = jp.value("mute", false);
+            s.plugins.push_back(std::move(p));
+        }
+        s.masterEffects = effects(j.value("masterEffects", json::array()));
+        for (auto& jr : j.value("midiRoutes", json::array()))
+            s.midiRoutes.push_back({jr.value("source", ""), jr.value("plugin", ""), (uint16_t)jr.value("notePort", 0)});
     } catch (const std::exception& e) {
         error = std::string("invalid session content: ") + e.what();
         return false;
@@ -220,6 +245,7 @@ bool Engine::loadSessionJson(const std::string& text, std::string& error) {
 
     clear();
     if (!setMasterGain(s.masterGain)) setMasterGain(1.0f);
+    setMasterMute(s.masterMute);
     EngineMode prevMode;
     uint32_t prevRate, prevCh, prevFrames;
     host_->invoke([&] {
@@ -254,6 +280,7 @@ bool Engine::loadSessionJson(const std::string& text, std::string& error) {
     auto make = [&](size_t i) {
         made[i].slot->cfg = s.plugins[i].cfg;
         made[i].slot->effects = s.plugins[i].effects;
+        made[i].slot->volume->reset(s.plugins[i].gain, s.plugins[i].mute);
         try {
             made[i].slot->chain = makeChain(*made[i].slot, made[i].stateRejected, made[i].error);
         } catch (const std::exception& e) {
@@ -282,6 +309,7 @@ bool Engine::loadSessionJson(const std::string& text, std::string& error) {
                 auto kept = std::make_unique<PluginSlot>();
                 kept->cfg = pc;
                 kept->effects = s.plugins[i].effects;
+                kept->volume->reset(s.plugins[i].gain, s.plugins[i].mute);
                 for (auto& e : kept->effects) e.status = "its instrument is not loaded";
                 assignIds(*kept);
                 kept->status = err;

@@ -21,6 +21,23 @@ struct Engine::EffectSlot {
     std::string status;
 };
 
+// An instrument's volume, on its chain's output: set on any thread, applied on the audio thread.
+struct ChainVolume {
+    std::atomic<float> gain{1.0f};
+    std::atomic<bool> mute{false};
+    float applied = 1.0f;  // audio thread: what the last block ended at
+
+    float target() const {
+        return mute.load(std::memory_order_relaxed) ? 0.0f : gain.load(std::memory_order_relaxed);
+    }
+    // Before the slot is in the graph: no ramp from what it was.
+    void reset(float g, bool m) {
+        gain.store(g, std::memory_order_relaxed);
+        mute.store(m, std::memory_order_relaxed);
+        applied = target();
+    }
+};
+
 // An instrument and its effects, or the master's effects (master_, with an empty cfg).
 struct Engine::PluginSlot {
     PluginConfig cfg;  // the instrument's: cfg.id is final; cfg.state is what a failed slot will save back
@@ -32,6 +49,8 @@ struct Engine::PluginSlot {
     std::unique_ptr<InputEventList> events = std::make_unique<InputEventList>();
     // Shared: a cached snapshot reads them after the slot is gone. The master's has only `load`.
     std::shared_ptr<ChainMeters> meters = std::make_shared<ChainMeters>();
+    // An instrument's; shared as the meters are, read live with them.
+    std::shared_ptr<ChainVolume> volume = std::make_shared<ChainVolume>();
     std::string status;
     // Host thread: EngineEvent::PluginCrashed sent for the chain's crash; cleared once the chain is
     // gone or no longer crashed.
@@ -83,7 +102,6 @@ struct Engine::SourceSlot {
 struct Engine::RtGraph {
     struct Out {
         uint32_t port, channel, output;
-        float gain;
     };
     struct Node {
         HostedChain* chain;  // null while out (PluginSlot::Change::Out)
@@ -91,6 +109,7 @@ struct Engine::RtGraph {
         PendingMidi* pending;
         InputEventList* events;
         ChainMeters* meters;
+        ChainVolume* volume;
         bool holdMidi;  // its chain changes: its MIDI waits in `pending` and `direct`
         std::vector<uint32_t> portChannels;  // how many channels each of the instrument's output ports has
         std::vector<Out> outs;
